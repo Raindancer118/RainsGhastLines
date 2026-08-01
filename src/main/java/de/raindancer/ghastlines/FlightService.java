@@ -612,9 +612,44 @@ public final class FlightService implements Listener {
             cargo.setVelocity(velocity);
             // The load points along the way it is being pulled, and turns into it rather than snapping —
             // without this the boat kept whatever heading it started with while the ghast flew off sideways.
-            cargo.setRotation(Tow.yaw(cargo.getLocation().getYaw(), velocity),
-                    cargo.getLocation().getPitch());
+            aim(cargo, Tow.yaw(cargo.getLocation().getYaw(), velocity));
         }
+    }
+
+    /**
+     * How far off the heading a ridden load may be before it is turned by force, in degrees.
+     * <p>
+     * Wider than one tick of {@link Tow#MAX_TURN_PER_TICK}, so a load already pointing where it is going is
+     * left alone entirely and a straight leg costs nothing.
+     */
+    private static final float YAW_TOLERANCE = 3.0f;
+
+    /**
+     * Points the load along the tow.
+     *
+     * <h2>Why a passenger changes the method</h2>
+     * A vehicle's rider is authoritative for it: their client simulates the boat and sends its position
+     * <em>and its rotation</em> up every tick, and the server takes them. So {@link Entity#setRotation} on a
+     * boat with somebody in it is overwritten before anybody sees it — which is exactly the bug: the heading
+     * froze at whatever it was the moment a player sat down, and the ghast flew off around it. An empty boat
+     * has no such owner and turns perfectly well on its own.
+     *
+     * <p>A teleport is the one thing a rider's client does accept, because it arrives as a vehicle move it
+     * did not predict. It is sent to the position the boat is already at — the position that client itself
+     * reported — so nothing moves and only the heading changes, and only when the heading is actually wrong.
+     * On a straight leg that is never.
+     */
+    private void aim(Entity cargo, float yaw) {
+        Location where = cargo.getLocation();
+        if (cargo.getPassengers().isEmpty()) {
+            cargo.setRotation(yaw, where.getPitch());
+            return;
+        }
+        if (Math.abs(Tow.wrapDegrees(yaw - where.getYaw())) < YAW_TOLERANCE) {
+            return;
+        }
+        where.setYaw(yaw);
+        cargo.teleportAsync(where, TeleportFlag.EntityState.RETAIN_PASSENGERS);
     }
 
     /** Looks for what is tied to the ghast now — a boat can be hitched on at a stop halfway through a line. */
