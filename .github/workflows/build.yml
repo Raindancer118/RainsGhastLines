@@ -1,0 +1,149 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Release notes are generated from the commits since the previous tag, which needs more
+          # than the default shallow clone.
+          fetch-depth: 0
+
+      # Paper 26.2 ships class files at version 69, i.e. Java 25, and requires it at runtime.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      # Read the version out of the pom once and reuse it everywhere, so the jar name, the release
+      # title and the tag check can never disagree about what is being built.
+      - name: Read the project version
+        id: version
+        run: |
+          VERSION="$(mvn --batch-mode --quiet -DforceStdout help:evaluate -Dexpression=project.version)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "jar=target/RainsGhastLines-$VERSION.jar" >> "$GITHUB_OUTPUT"
+          echo "Building RainsGhastLines $VERSION"
+
+      # Checked before anything is built, let alone published: a jar whose name disagrees with the
+      # release it hangs off is worse than a failed build.
+      - name: Check the tag matches the pom version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "${{ steps.version.outputs.version }}" != "$TAG" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the pom version ${{ steps.version.outputs.version }}."
+            echo "Bump <version> in pom.xml, or retag, so the jar matches the release."
+            exit 1
+          fi
+
+      - name: Build and test
+        run: mvn --batch-mode --no-transfer-progress verify
+
+      - name: Publish test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: target/surefire-reports/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Fails loudly when the jar is not where the version said it would be, rather than letting an
+      # empty release be published.
+      - name: Verify the jar
+        id: jar
+        run: |
+          JAR="${{ steps.version.outputs.jar }}"
+          test -f "$JAR" || { echo "::error::$JAR was not produced."; exit 1; }
+          SHA="$(sha256sum "$JAR" | cut -d' ' -f1)"
+          SIZE="$(du -h "$JAR" | cut -f1)"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "$SHA  $(basename "$JAR")" > "$JAR.sha256"
+          {
+            echo "### RainsGhastLines ${{ steps.version.outputs.version }}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Jar | \`$(basename "$JAR")\` ($SIZE) |"
+            echo "| SHA-256 | \`$SHA\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RainsGhastLines-${{ steps.version.outputs.version }}
+          path: |
+            ${{ steps.version.outputs.jar }}
+            ${{ steps.version.outputs.jar }}.sha256
+
+      # Every push to main republishes a rolling "latest", so there is always one link to the newest
+      # build without needing a tag. Marked pre-release: it is whatever main happens to be.
+      - name: Publish rolling "latest"
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s\n' \
+            "Automatic build from main @ \`${{ github.sha }}\`." \
+            "" \
+            "**This is not a release** — it is whatever main currently is." \
+            "For a fixed version, use a tagged release." \
+            "" \
+            "\`sha256: ${{ steps.jar.outputs.sha256 }}\`" > notes.md
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest \
+            "${{ steps.version.outputs.jar }}" \
+            "${{ steps.version.outputs.jar }}.sha256" \
+            --repo "${{ github.repository }}" \
+            --title "Latest build (${{ steps.version.outputs.version }})" \
+            --notes-file notes.md \
+            --prerelease
+
+      # A pushed vX.Y.Z tag cuts the permanent, versioned release.
+      - name: Publish the versioned release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.jar.outputs.sha256 }}
+        run: |
+          printf '%s\n' \
+            "Happy ghasts as transport: claim one, call it to you from anywhere, send it to a stop," \
+            "or run a bus route with it. /ghast, /gstop, /groute — and a menu for all of it." \
+            "" \
+            "### Installing" \
+            "" \
+            "Drop \`RainsGhastLines-${VERSION}.jar\` into \`plugins/\` and restart. Two ghasts and" \
+            "twelve stops each out of the box; \`ghastlines.unlimited\` lifts every limit, and" \
+            "everything else is in \`config.yml\`." \
+            "" \
+            "Already running **Rain's SMP Core**? This plugin is folded into it as the \`ghasts\`" \
+            "module — install one or the other, not both." \
+            "" \
+            "\`sha256: ${SHA256}\`" \
+            "" \
+            "---" > notes.md
+          gh release create "${{ github.ref_name }}" \
+            "${{ steps.version.outputs.jar }}" \
+            "${{ steps.version.outputs.jar }}.sha256" \
+            --repo "${{ github.repository }}" \
+            --title "RainsGhastLines ${VERSION}" \
+            --notes-file notes.md \
+            --generate-notes

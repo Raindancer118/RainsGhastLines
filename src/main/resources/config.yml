@@ -1,0 +1,55 @@
+# Rain's Ghast Lines
+#
+#   /ghast                  the menu; everything below is in it
+#   /ghast claim            claim the happy ghast you are standing next to, or riding
+#   /ghast summon [ghast]   it flies to you, wherever you are
+#   /ghast send <where>     send it — and anyone aboard — to a stop or one of your homes
+#   /ghast status           every ghast in the air, and how far along it is
+#   /gstop add <name>       make where you are standing a stop
+#   /groute create <name>   start a line; two or more stops, one way or a loop
+#
+# A ghast's name is its name tag. Put one on and it answers to that; without one it answers to the
+# first eight characters of its id, which /ghast list shows.
+#
+# Permissions:
+#   ghastlines.use          the commands and the menus       (default: everyone)
+#   ghastlines.unlimited    no limits, no summon cooldown     (default: nobody)
+#   ghastlines.admin        stop anybody's flight             (default: operators)
+#
+# /ghast status needs no permission at all: a transit network with a private timetable is not one.
+
+ghasts:
+  # How many happy ghasts one player may claim. A claimed ghast stops despawning and can be called
+  # from anywhere. 0 switches claiming off for everybody without ghastlines.unlimited.
+  max-per-player: 2
+
+  # Places a player may keep as stops, and lines they may write.
+  max-stops: 12
+  max-routes: 5
+
+  # Blocks per second. Vanilla walking is about 4 and a boat on ice is about 40; 12 feels like a slow
+  # aeroplane. Higher makes the network more useful and the journey less of one.
+  speed: 12
+
+  # Blocks of air kept between a flying ghast and the ground under it. This is what makes it fly over
+  # a mountain rather than into it, so a low number on hilly terrain means a lot of climbing.
+  cruise-clearance: 12
+
+  # How long a ghast hovers at a stop so people can get on and off — and how long it waits after
+  # coming to somebody who called it.
+  boarding-seconds: 8
+
+  # Seconds before the same player may call a ghast to them again. 0 for none.
+  summon-cooldown-seconds: 30
+
+  # The furthest a flight will be started, in blocks. A refusal names the distance and this limit.
+  max-distance: 2000
+
+  # A ghast cannot fly between worlds — there is no route for it to take — so a cross-world flight
+  # begins with it, and everybody aboard, appearing high above the destination and flying down. Off by
+  # default: it is the one part of this plugin where the ghast does not really make the journey.
+  allow-cross-world: false
+
+  # Flight progress on a boss bar for whoever called it, whoever owns the ghast and whoever is riding
+  # it. Off puts the same line, with a text bar, on the action bar instead.
+  progress-in-boss-bar: true

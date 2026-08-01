@@ -1,0 +1,28 @@
+name: ${project.name}
+version: ${project.version}
+main: de.raindancer.ghastlines.GhastLinesPlugin
+api-version: '1.21'
+description: ${project.description}
+author: Raindancer118
+website: https://github.com/Raindancer118
+
+# Bukkit.getScheduler() is never touched. A flight is a repeating task on its ghast's own
+# EntityScheduler — regionised on Folia, ordinary on Paper, and cancelled for us when the entity goes
+# away. Chunk tickets are taken out on the GlobalRegionScheduler, because they are server-wide
+# bookkeeping for chunks the flight has not reached yet. Saving happens on a thread this plugin owns,
+# off the server's schedulers entirely, so a write can never land in the middle of a tick.
+folia-supported: true
+
+permissions:
+  ghastlines.use:
+    description: Claim happy ghasts, keep stops and routes, and fly. /ghast status needs nothing.
+    default: true
+  ghastlines.unlimited:
+    # Deliberately not granted to operators: "how many ghasts may this rank have" is a decision for
+    # whoever runs the server, and an admin inheriting an unlimited cap by accident hides the fact
+    # that the limit was never actually configured.
+    description: Exempt from the limits on ghasts, stops and routes, and from the summon cooldown
+    default: false
+  ghastlines.admin:
+    description: Stop anybody's flight from the departures board or /ghast recall <id>
+    default: op
