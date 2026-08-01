@@ -902,6 +902,10 @@ public final class FlightService implements Listener {
         releaseTickets(flight);
         releaseCargo(flight);
         land(flight);
+        // Where it stopped is worth a file, once. During the flight the position is only kept in memory —
+        // see Claims#sawAt — so this is what makes the ghast findable again without a chunk having to
+        // unload first.
+        plugin.store().flushSeen();
         if (why != null) {
             announceTo(flight, List.of(), Text.warn("<why>", Text.arg("why", why)));
         }
@@ -1335,7 +1339,7 @@ public final class FlightService implements Listener {
                 continue;
             }
             plugin.store().claimOf(ghast.getUniqueId())
-                    .ifPresent(claim -> plugin.claims().sawAt(claim, ghast));
+                    .ifPresent(claim -> plugin.claims().sawAtNow(claim, ghast));
         }
     }
 

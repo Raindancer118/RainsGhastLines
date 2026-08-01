@@ -298,8 +298,19 @@ public final class Claims {
                 }));
     }
 
-    /** Notes where a ghast is, so a summons can find it after the chunk unloads. */
+    /**
+     * Notes where a ghast is, so a summons can find it after the chunk unloads.
+     * <p>
+     * Called four times a second by every flight in the air, so it only keeps the position in memory and
+     * lets {@link TransitStore#noteSeen} decide when it is worth a file. Use {@link #sawAtNow} at the
+     * moments the position stops being observable.
+     */
     public void sawAt(GhastClaim claim, HappyGhast ghast) {
+        plugin.store().noteSeen(claim.seenAt(plainName(ghast), ghast.getLocation()));
+    }
+
+    /** The same, written out at once: for the instant a ghast stops being somewhere anybody can look. */
+    public void sawAtNow(GhastClaim claim, HappyGhast ghast) {
         plugin.store().refreshClaim(claim.seenAt(plainName(ghast), ghast.getLocation()));
     }
 

@@ -234,6 +234,54 @@ public final class TransitStore {
         persist();
     }
 
+    /** How long a flying ghast's recorded position may go unwritten. */
+    private static final long SEEN_SAVE_INTERVAL_MS = 15_000;
+
+    private volatile long lastSeenSave;
+    private volatile boolean seenPending;
+
+    /**
+     * Notes where a claimed ghast is now, in memory, and writes it out at most every fifteen seconds.
+     *
+     * <h2>Why this is not {@link #refreshClaim}</h2>
+     * It was, and that guard — "does nothing when the claim has not actually changed" — never held for a
+     * ghast in flight: the position it compares is the ghast's exact double-precision location, which is
+     * different every single time. So a flight rewrote the file four times a second, and each rewrite deep
+     * copied every stop, route and claim on the flight's own thread and serialised the entire file on the
+     * writer's. On a server with a few hundred stops that is the most expensive thing this plugin does, and
+     * it did it while flying.
+     *
+     * <p>The position is a hint for finding a ghast again after its chunk unloads, not a ledger, so it does
+     * not need to be durable to the tick. It is kept in memory, written every fifteen seconds, flushed at
+     * {@link #close}, and saved outright at the one moment it stops being observable — see
+     * {@code FlightService.onEntitiesUnload}, which calls {@link #refreshClaim} directly.
+     */
+    public void noteSeen(GhastClaim updated) {
+        GhastClaim existing = claims.get(updated.ghast());
+        if (updated.equals(existing)) {
+            return;
+        }
+        claims.put(updated.ghast(), updated);
+        long now = System.currentTimeMillis();
+        if (now - lastSeenSave < SEEN_SAVE_INTERVAL_MS) {
+            seenPending = true;
+            return;
+        }
+        lastSeenSave = now;
+        seenPending = false;
+        persist();
+    }
+
+    /** Writes out positions noted since the last save, if there are any. */
+    public void flushSeen() {
+        if (!seenPending) {
+            return;
+        }
+        seenPending = false;
+        lastSeenSave = System.currentTimeMillis();
+        persist();
+    }
+
     public int totalStops() {
         return stops.values().stream().mapToInt(Map::size).sum();
     }
@@ -468,6 +516,7 @@ public final class TransitStore {
 
     /** Flushes and stops the writer. Blocks briefly: a shutdown must not lose the last change. */
     public void close() {
+        flushSeen();
         writer.shutdown();
         try {
             if (!writer.awaitTermination(10, TimeUnit.SECONDS)) {
