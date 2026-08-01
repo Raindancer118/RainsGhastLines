@@ -30,13 +30,13 @@ import org.bukkit.configuration.ConfigurationSection;
  */
 public record TransitOptions(int maxGhasts, int maxStops, int maxRoutes, int speedPercent, int clearance,
                              int boardingSeconds, int summonCooldownSeconds, int maxDistance,
-                             boolean allowCrossWorld, boolean bossBar) {
+                             boolean allowCrossWorld, boolean bossBar, boolean keepLoaded) {
 
     /** Ticks per second, i.e. how the per-second settings become per-tick numbers. */
     public static final int TICKS_PER_SECOND = 20;
 
     public static TransitOptions defaults() {
-        return new TransitOptions(2, 12, 5, 100, 12, 8, 30, 1200, false, true);
+        return new TransitOptions(2, 12, 5, 100, 12, 8, 30, 1200, false, true, true);
     }
 
     /** Reads the standalone plugin's own {@code config.yml}, or the host's {@code ghasts:} section. */
@@ -55,7 +55,8 @@ public record TransitOptions(int maxGhasts, int maxStops, int maxRoutes, int spe
                 clamp(config.getInt("summon-cooldown-seconds", fallback.summonCooldownSeconds()), 0, 3600),
                 clamp(config.getInt("max-distance", fallback.maxDistance()), 50, 20000),
                 config.getBoolean("allow-cross-world", fallback.allowCrossWorld()),
-                config.getBoolean("progress-in-boss-bar", fallback.bossBar()));
+                config.getBoolean("progress-in-boss-bar", fallback.bossBar()),
+                config.getBoolean("keep-loaded", fallback.keepLoaded()));
     }
 
     /**

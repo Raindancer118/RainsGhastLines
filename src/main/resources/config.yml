@@ -55,3 +55,10 @@ ghasts:
   # Flight progress on a boss bar for whoever called it, whoever owns the ghast and whoever is riding
   # it. Off puts the same line, with a text bar, on the action bar instead.
   progress-in-boss-bar: true
+
+  # Keeps the chunk a claimed ghast is in loaded, so it can be called from anywhere on the map and a
+  # flight keeps flying when nobody is watching it. An entity in an unloaded chunk is not ticked, cannot
+  # be found and cannot be moved — so with this off, calling a ghast has to find it first and a flight
+  # over empty terrain freezes until somebody walks near it. A loaded chunk is a ticked chunk, so this
+  # costs a little per claimed ghast; max-per-player is what bounds the bill.
+  keep-loaded: true

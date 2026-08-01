@@ -35,9 +35,10 @@ class TransitOptionsTest {
         config.set("max-distance", 5000);
         config.set("allow-cross-world", true);
         config.set("progress-in-boss-bar", false);
+        config.set("keep-loaded", false);
 
         assertThat(TransitOptions.from(config))
-                .isEqualTo(new TransitOptions(4, 30, 9, 150, 24, 15, 60, 5000, true, false));
+                .isEqualTo(new TransitOptions(4, 30, 9, 150, 24, 15, 60, 5000, true, false, false));
     }
 
     @Test

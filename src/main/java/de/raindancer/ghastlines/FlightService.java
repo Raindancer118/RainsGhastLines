@@ -20,6 +20,7 @@ import io.papermc.paper.entity.Leashable;
 import org.bukkit.event.entity.EntityRemoveEvent;
 import org.bukkit.event.entity.EntityUnleashEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.world.EntitiesLoadEvent;
 import org.bukkit.event.world.EntitiesUnloadEvent;
 import org.bukkit.util.Vector;
 
@@ -148,7 +149,19 @@ public final class FlightService implements Listener {
     public FlightService(GhastLines plugin) {
         this.plugin = plugin;
         this.tickets = new Tickets(plugin);
+        this.standby = new Standby(plugin, tickets);
+        this.standby.start();
     }
+
+    /**
+     * The moorings that keep claimed ghasts loaded when nothing is flying them.
+     * <p>
+     * Built here rather than in the plugin class because there are two of those — one for the module, one for
+     * the standalone jar — and a seam that has to be soldered twice is a seam that will one day be soldered
+     * once. It shares the flights' {@link Tickets} deliberately: two counters over one set of chunk tickets
+     * would take each other's chunks away.
+     */
+    private final Standby standby;
 
     // ------------------------------------------------------------------ what is in the air
 
@@ -584,7 +597,12 @@ public final class FlightService implements Listener {
         for (UUID id : List.copyOf(flight.cargo())) {
             Entity cargo = Bukkit.getEntity(id);
             if (cargo == null || !cargo.isValid()) {
-                flight.cargo().remove(id);
+                // Neither of these means gone. {@code isValid} is false for an entity whose chunk is not
+                // loaded this instant, and unresolvable is the same thing seen from the other side — a load
+                // between hands for a tick. Both used to strike it off the flight's books, and a ghast does
+                // not go back for what it has forgotten: that is a boat left hanging in the air, gravity
+                // still off, while the flight carries on without it. Only the lead decides — see
+                // {@link #rescanCargo}.
                 continue;
             }
             if (!airborne || !roomToHang) {
@@ -652,19 +670,22 @@ public final class FlightService implements Listener {
         cargo.teleportAsync(where, TeleportFlag.EntityState.RETAIN_PASSENGERS);
     }
 
-    /** Looks for what is tied to the ghast now — a boat can be hitched on at a stop halfway through a line. */
+    /**
+     * Looks for what is tied to the ghast now — a boat can be hitched on at a stop halfway through a line.
+     *
+     * <h2>Proximity finds cargo; the lead is what keeps it</h2>
+     * This used to be one search doing both jobs, and the second job it did badly: anything that had fallen
+     * outside the twenty-block sweep was struck off, and since a ghast does not go back for it, struck off
+     * meant abandoned. A load that dropped behind for a moment — a passenger logging out, a chunk arriving
+     * late — was left hanging wherever it happened to be while the flight carried on without it. So the
+     * sweep only adds now. What is already on the books stays there as long as the lead is still tied, and
+     * being far behind is exactly the situation {@link Tow#tooFar} exists to recover from.
+     */
     private void rescanCargo(Flight flight, HappyGhast ghast) {
         Set<UUID> found = new HashSet<>();
         for (Entity nearby : ghast.getNearbyEntities(CARGO_SEARCH, CARGO_SEARCH, CARGO_SEARCH)) {
-            if (!(nearby instanceof Leashable leashable) || !leashable.isLeashed()) {
-                continue;
-            }
-            try {
-                if (ghast.equals(leashable.getLeashHolder())) {
-                    found.add(nearby.getUniqueId());
-                }
-            } catch (IllegalStateException noLongerLeashed) {
-                // Documented to throw when the leash has gone between the two calls above.
+            if (tiedTo(nearby, ghast)) {
+                found.add(nearby.getUniqueId());
             }
         }
         // Anything that has been untied gets its gravity back before it is forgotten about.
@@ -673,12 +694,33 @@ public final class FlightService implements Listener {
                 continue;
             }
             Entity gone = Bukkit.getEntity(id);
-            if (gone != null) {
-                gone.setGravity(true);
+            if (gone == null) {
+                // Out of reach rather than untied — the search above only sees what is loaded near the
+                // ghast. Kept on the books, because dropping it here drops the one record of a load that
+                // is owed its gravity back.
+                continue;
             }
+            if (tiedTo(gone, ghast)) {
+                // Behind the sweep but still on the lead: still cargo, and it gets pulled back in.
+                continue;
+            }
+            gone.setGravity(true);
             flight.cargo().remove(id);
         }
         flight.cargo().addAll(found);
+    }
+
+    /** Whether that lead is tied to this ghast. False for anything that cannot be on a lead at all. */
+    private static boolean tiedTo(Entity entity, HappyGhast ghast) {
+        if (!(entity instanceof Leashable leashable) || !leashable.isLeashed()) {
+            return false;
+        }
+        try {
+            return ghast.equals(leashable.getLeashHolder());
+        } catch (IllegalStateException noLongerLeashed) {
+            // Documented to throw when the leash has gone between the two calls above.
+            return false;
+        }
     }
 
     /** Gives every carried entity its gravity back. Called from the one exit, like the chunk tickets. */
@@ -934,8 +976,12 @@ public final class FlightService implements Listener {
             return;
         }
         flight.finish();
-        releaseTickets(flight);
+        // The cargo first, and the chunks it is in second. The other way round, the tickets went back before
+        // anything had given the load its gravity again — and a load whose chunk has just been let go cannot
+        // be found to be given anything. That is a boat left hanging in the air for good, with the ghast
+        // still tied to it and pulling.
         releaseCargo(flight);
+        releaseTickets(flight);
         land(flight);
         // Where it stopped is worth a file, once. During the flight the position is only kept in memory —
         // see Claims#sawAt — so this is what makes the ghast findable again without a chunk having to
@@ -1068,6 +1114,7 @@ public final class FlightService implements Listener {
 
     /** Called from {@code onDisable}: a flight outliving the plugin holds chunks loaded for ever. */
     public void cancelAll() {
+        standby.stop();
         for (Flight flight : List.copyOf(flying.values())) {
             if (flight.task() != null) {
                 flight.task().cancel();
@@ -1384,6 +1431,41 @@ public final class FlightService implements Listener {
             }
             plugin.store().claimOf(ghast.getUniqueId())
                     .ifPresent(claim -> plugin.claims().sawAtNow(claim, ghast));
+        }
+    }
+
+    /**
+     * Gives a stranded load its gravity back.
+     *
+     * <h2>Why this exists rather than only the careful bookkeeping</h2>
+     * A load is carried with its gravity switched off, and every way a flight can end switches it back on.
+     * That is one class of bug away from a boat hanging in the sky for good — and it was: a load the server
+     * could not resolve for a moment was struck off the flight's books, and nothing was left that knew it
+     * was owed anything. The bookkeeping is fixed, but "fixed" is a claim about code and this is a claim
+     * about the world: anything hanging with its gravity off, tied to a ghast that is not flying it, is put
+     * right the moment it loads. Somebody's boat is not the place to find out the bookkeeping was wrong
+     * again, and this also unsticks the ones that are already up there.
+     *
+     * <p>Safe by construction: a load that really is being carried has its gravity switched off again on the
+     * very next tick of {@link #carry}, so the worst this can do to a live flight is one tick of gravity.
+     */
+    @EventHandler
+    public void onEntitiesLoad(EntitiesLoadEvent event) {
+        for (Entity entity : event.getEntities()) {
+            if (entity.hasGravity() || !(entity instanceof Leashable leashable) || !leashable.isLeashed()) {
+                continue;
+            }
+            try {
+                if (!(leashable.getLeashHolder() instanceof HappyGhast holder)) {
+                    continue;
+                }
+                Flight flight = flying.get(holder.getUniqueId());
+                if (flight == null || !flight.cargo().contains(entity.getUniqueId())) {
+                    entity.setGravity(true);
+                }
+            } catch (IllegalStateException noLongerLeashed) {
+                // Documented to throw when the leash has gone between the two calls above.
+            }
         }
     }
 
