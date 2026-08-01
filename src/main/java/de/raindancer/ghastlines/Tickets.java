@@ -96,7 +96,7 @@ final class Tickets {
     }
 
     private void apply(World world, List<Long> acquiring, List<Long> releasing) {
-        Bukkit.getGlobalRegionScheduler().execute(plugin, () -> {
+        Runnable work = () -> {
             Map<Long, Integer> counts = wanted.computeIfAbsent(world.getName(),
                     ignored -> new ConcurrentHashMap<>());
             for (Long key : acquiring) {
@@ -110,6 +110,16 @@ final class Tickets {
                     world.removePluginChunkTicket(chunkX(key), chunkZ(key), plugin);
                 }
             }
-        });
+        };
+        // The one moment the scheduler will not take this is the one moment it matters most: a disabled
+        // plugin cannot schedule anything, and the last thing a shutdown does is release every ticket. It
+        // threw, the release never ran, and every chunk a flight was passing through stayed loaded for the
+        // rest of the server's life. Shutdown is on the server thread already, so the work is simply done
+        // here instead of being handed to a scheduler that has stopped listening.
+        if (!plugin.isEnabled()) {
+            work.run();
+            return;
+        }
+        Bukkit.getGlobalRegionScheduler().execute(plugin, work);
     }
 }

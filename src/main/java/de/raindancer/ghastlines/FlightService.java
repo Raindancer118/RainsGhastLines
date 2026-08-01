@@ -552,10 +552,11 @@ public final class FlightService implements Listener {
      * lift a boat with a passenger in it off the ground. The rope stays attached and the boat stays where it
      * was, which is the whole of "a happy ghast cannot carry you in a boat".
      *
-     * <p>So the cargo is carried rather than dragged: gravity off, held a few blocks under the ghast, pulled
-     * proportionally when it drifts and teleported when it has fallen so far behind that the rope would snap.
-     * Gravity comes back on at a stop and when the flight ends — {@link #releaseCargo} is called from
-     * {@link #end}, on every ending there is, for the same reason the chunk tickets are.
+     * <p>So the cargo is carried rather than dragged, and {@link Tow} is how: gravity off, hanging under the
+     * ghast on a spring rather than pinned to a point, keeping its own momentum so it swings and trails, and
+     * turned into the direction it is being pulled. Gravity comes back on at a stop and when the flight ends
+     * — {@link #releaseCargo} is called from {@link #end}, on every ending there is, for the same reason the
+     * chunk tickets are.
      *
      * @param airborne whether the ghast is flying; false at a stop, where the cargo should settle
      */
@@ -566,27 +567,53 @@ public final class FlightService implements Listener {
         if (flight.cargo().isEmpty()) {
             return;
         }
-        Location under = ghast.getLocation().clone().subtract(0, CARRY_BELOW, 0);
+        Vector carrier = ghast.getVelocity();
+        Vector anchor = Tow.anchor(ghast.getLocation().toVector());
+
+        // The anchor hangs three blocks under the ghast, and on a descent that puts it under the ground —
+        // where the spring would haul the boat straight into the floor, which is exactly what it did. So the
+        // rope shortens as the ghast comes down: the load is never asked to be below standing height.
+        World world = ghast.getWorld();
+        double floor = world.getHighestBlockYAt(anchor.getBlockX(), anchor.getBlockZ()) + FLOOR_CLEARANCE;
+        anchor.setY(Math.max(anchor.getY(), floor));
+
+        // No room left to hang at all: the ghast is at ground level, so the load is simply put down rather
+        // than held somewhere it does not fit.
+        boolean roomToHang = ghast.getLocation().getY() - anchor.getY() >= MINIMUM_HANG;
+
         for (UUID id : List.copyOf(flight.cargo())) {
             Entity cargo = Bukkit.getEntity(id);
             if (cargo == null || !cargo.isValid()) {
                 flight.cargo().remove(id);
                 continue;
             }
-            if (!airborne) {
+            if (!airborne || !roomToHang) {
                 cargo.setGravity(true);
                 continue;
             }
             cargo.setGravity(false);
-            double gap = cargo.getLocation().distance(under);
-            if (gap > CARRY_TELEPORT_GAP) {
-                // Further behind than the rope is long: it is about to be cut, so put the cargo where it
-                // should have been. Passengers are retained explicitly, because the default is to drop them.
-                cargo.teleportAsync(under, TeleportFlag.EntityState.RETAIN_PASSENGERS);
+
+            Vector where = cargo.getLocation().toVector();
+            if (Tow.tooFar(where, anchor)) {
+                // Further behind than the rope would tolerate. Passengers are retained explicitly, because
+                // the default is to drop them, and dropping somebody mid-flight is the worst outcome here.
+                cargo.teleportAsync(anchor.toLocation(cargo.getWorld()),
+                        TeleportFlag.EntityState.RETAIN_PASSENGERS);
                 continue;
             }
-            Vector pull = under.toVector().subtract(cargo.getLocation().toVector());
-            cargo.setVelocity(gap <= CARRY_SLACK ? ghast.getVelocity() : pull.multiply(CARRY_PULL));
+
+            Vector velocity = Tow.velocity(where, anchor, cargo.getVelocity(), carrier);
+            // Never pushed downward into whatever it is standing on: the spring is allowed to hold the load
+            // up and to pull it along, but the ground decides how low it goes.
+            double ownFloor = world.getHighestBlockYAt(cargo.getLocation()) + FLOOR_CLEARANCE;
+            if (cargo.getLocation().getY() <= ownFloor && velocity.getY() < 0) {
+                velocity.setY(0);
+            }
+            cargo.setVelocity(velocity);
+            // The load points along the way it is being pulled, and turns into it rather than snapping —
+            // without this the boat kept whatever heading it started with while the ghast flew off sideways.
+            cargo.setRotation(Tow.yaw(cargo.getLocation().getYaw(), velocity),
+                    cargo.getLocation().getPitch());
         }
     }
 
@@ -644,22 +671,11 @@ public final class FlightService implements Listener {
     /** How far down its heading the ghast looks, so its head and body agree about where "forward" is. */
     private static final double LOOK_AHEAD_BLOCKS = 12.0;
 
-    /** How far under the ghast its cargo is carried — under the body, where the leads hang from. */
-    private static final double CARRY_BELOW = 3.0;
+    /** How far above the ground the load is kept, so a descent cannot press it into the floor. */
+    private static final double FLOOR_CLEARANCE = 1.2;
 
-    /** Within this of where it should be, the cargo simply matches the ghast's velocity. */
-    private static final double CARRY_SLACK = 1.5;
-
-    /** How hard the cargo is pulled back into place, per block of drift. */
-    private static final double CARRY_PULL = 0.35;
-
-    /**
-     * Beyond this the cargo is teleported rather than pulled.
-     * <p>
-     * Under vanilla's snap distance of sixteen, and under the ten at which the rope goes taut, so a boat that
-     * has fallen a long way behind is put back before the rope has an opinion about it.
-     */
-    private static final double CARRY_TELEPORT_GAP = 8.0;
+    /** Below this much room under the ghast, the load is set down instead of hung. */
+    private static final double MINIMUM_HANG = 1.5;
 
     /** How often the ghast is asked what is tied to it. A boat can be hitched on at any stop. */
     private static final int CARGO_RESCAN_TICKS = 20;
@@ -719,7 +735,7 @@ public final class FlightService implements Listener {
         for (UUID id : List.copyOf(flight.cargo())) {
             Entity cargo = Bukkit.getEntity(id);
             if (cargo != null) {
-                cargo.teleportAsync(above.clone().subtract(0, CARRY_BELOW, 0),
+                cargo.teleportAsync(above.clone().subtract(0, Tow.HANG_BELOW, 0),
                         TeleportFlag.EntityState.RETAIN_PASSENGERS);
             }
         }
