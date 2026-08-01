@@ -36,7 +36,7 @@ public record TransitOptions(int maxGhasts, int maxStops, int maxRoutes, int spe
     public static final int TICKS_PER_SECOND = 20;
 
     public static TransitOptions defaults() {
-        return new TransitOptions(2, 12, 5, 100, 12, 8, 30, 2000, false, true);
+        return new TransitOptions(2, 12, 5, 100, 12, 8, 30, 1200, false, true);
     }
 
     /** Reads the standalone plugin's own {@code config.yml}, or the host's {@code ghasts:} section. */

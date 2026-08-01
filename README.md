@@ -41,9 +41,11 @@ always works, and renaming one fixes it.
 
 ## It flies the route, and it navigates
 
-A summons is not a teleport. The ghast flies at **its own speed** — `FLYING_SPEED` read off the entity and
-scaled by `speed-percent`, so 100 means "as fast as a happy ghast flies" and this plugin has no opinion about
-what that is in blocks per second. It climbs *while* flying rather than rising like a lift, holds a cruise
+A summons is not a teleport. The ghast flies at **its own speed** — `FLYING_SPEED` read off the entity every
+tick, so anything that changes a ghast's speed changes the flight's. That is about **3.8 blocks a second** for
+a stock happy ghast: slow, because happy ghasts are slow. The figure is measured off a ridden one rather than
+derived from vanilla's constants, which give 18 and are plainly not what one flies at. `speed-percent` scales
+it. It climbs *while* flying rather than rising like a lift, holds a cruise
 line kept clear of the terrain **ahead** of it, and comes down a glide slope three blocks long for every block
 of height to lose, so it arrives level with the stop instead of stopping dead above it and sinking. Every
 heading change is rate-limited, so it banks into turns and looks where it is going.

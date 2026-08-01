@@ -91,8 +91,27 @@ public final class FlightService implements Listener {
     /** The heights a wall is looked for at: the ghast's middle and its shoulders. */
     private static final int[] BODY_HEIGHTS = {1, 3};
 
-    /** Vanilla's air drag for a flying entity: velocity is multiplied by this every tick. */
-    private static final double AIR_DRAG = 0.91;
+    /**
+     * Blocks per tick a ridden happy ghast actually flies, per unit of its {@code FLYING_SPEED}.
+     *
+     * <h2>Why this is measured and not derived</h2>
+     * It was derived twice and both times it was wrong. Reading vanilla's own bytecode says
+     * {@code HappyGhast.travel} passes {@code flying_speed * 5 / 3} to {@code travelFlying}, which adds it to
+     * the velocity and scales the result by an air drag of {@code 0.91} — giving a terminal speed of
+     * {@code a * 5/3 / (1 - 0.91)}, or about 18 blocks a second for a stock ghast. A real ridden happy ghast,
+     * measured on a real server by sitting in the harness and holding forward, does **3.5 to 4**. Something
+     * between the rider's input and that arithmetic scales it down by a factor of five, and rather than keep
+     * guessing at which term it is, this is the number that was observed.
+     *
+     * <p>{@code 3.8} blocks per tick per unit of the attribute puts a stock ghast — {@code flying_speed 0.05}
+     * — at {@code 0.19} blocks a tick, which is 3.8 blocks a second: what one feels like. Kept as a ratio
+     * against the attribute rather than as a flat speed so that a ghast carrying a speed modifier still flies
+     * faster, which is the whole reason for reading the attribute at all.
+     *
+     * <p>Happy ghasts are slow. That is the animal, and a transit network made of them is a slow network; a
+     * server that wants otherwise has {@code ghasts.speed-percent}.
+     */
+    private static final double BLOCKS_PER_TICK_PER_FLYING_SPEED = 3.8;
 
     /** Used only if a happy ghast turns up without the attribute registered. Vanilla's own value. */
     private static final double FALLBACK_FLYING_SPEED = 0.05;
@@ -387,6 +406,9 @@ public final class FlightService implements Listener {
         double cruiseY = cruiseHeightFor(ghast, target, around);
 
         if (flight.isBoarding()) {
+            // Set the cargo down while the ghast waits: it has arrived, and a boat held three blocks in the
+            // air at a stop is a boat nobody can get out of.
+            carry(flight, ghast, false);
             List<UUID> riders = passengers(ghast);
             if (riders.isEmpty()) {
                 hover(ghast);
@@ -409,6 +431,7 @@ public final class FlightService implements Listener {
             return;
         }
 
+
         Steering.Phase next = Steering.next(flight.phase(), position, aim, cruiseY, around);
         flight.phase(next);
         flight.blocksLeft(position.distance(aim));
@@ -423,6 +446,7 @@ public final class FlightService implements Listener {
         flight.blocksPerTick(airspeed);
         Vector velocity = Steering.velocity(next, position, aim, cruiseY, airspeed, around);
         fly(ghast, velocity);
+        carry(flight, ghast, true);
 
         if (flight.stalled(position)) {
             stuck(flight, ghast, position, scheduled);
@@ -518,6 +542,94 @@ public final class FlightService implements Listener {
         };
     }
 
+    /**
+     * Brings whatever is on the ghast's leads along with it.
+     *
+     * <h2>Why the plugin has to do this at all</h2>
+     * Leash a boat to a happy ghast, get in, and the ghast flies off without you. Vanilla's rope is elastic
+     * within ten blocks and snaps at sixteen — {@code HappyGhast.leashElasticDistance} and
+     * {@code leashSnapDistance}, read out of the server's own class — and that elastic pull is not enough to
+     * lift a boat with a passenger in it off the ground. The rope stays attached and the boat stays where it
+     * was, which is the whole of "a happy ghast cannot carry you in a boat".
+     *
+     * <p>So the cargo is carried rather than dragged: gravity off, held a few blocks under the ghast, pulled
+     * proportionally when it drifts and teleported when it has fallen so far behind that the rope would snap.
+     * Gravity comes back on at a stop and when the flight ends — {@link #releaseCargo} is called from
+     * {@link #end}, on every ending there is, for the same reason the chunk tickets are.
+     *
+     * @param airborne whether the ghast is flying; false at a stop, where the cargo should settle
+     */
+    private void carry(Flight flight, HappyGhast ghast, boolean airborne) {
+        if ((ghast.getTicksLived() % CARGO_RESCAN_TICKS) == 0) {
+            rescanCargo(flight, ghast);
+        }
+        if (flight.cargo().isEmpty()) {
+            return;
+        }
+        Location under = ghast.getLocation().clone().subtract(0, CARRY_BELOW, 0);
+        for (UUID id : List.copyOf(flight.cargo())) {
+            Entity cargo = Bukkit.getEntity(id);
+            if (cargo == null || !cargo.isValid()) {
+                flight.cargo().remove(id);
+                continue;
+            }
+            if (!airborne) {
+                cargo.setGravity(true);
+                continue;
+            }
+            cargo.setGravity(false);
+            double gap = cargo.getLocation().distance(under);
+            if (gap > CARRY_TELEPORT_GAP) {
+                // Further behind than the rope is long: it is about to be cut, so put the cargo where it
+                // should have been. Passengers are retained explicitly, because the default is to drop them.
+                cargo.teleportAsync(under, TeleportFlag.EntityState.RETAIN_PASSENGERS);
+                continue;
+            }
+            Vector pull = under.toVector().subtract(cargo.getLocation().toVector());
+            cargo.setVelocity(gap <= CARRY_SLACK ? ghast.getVelocity() : pull.multiply(CARRY_PULL));
+        }
+    }
+
+    /** Looks for what is tied to the ghast now — a boat can be hitched on at a stop halfway through a line. */
+    private void rescanCargo(Flight flight, HappyGhast ghast) {
+        Set<UUID> found = new HashSet<>();
+        for (Entity nearby : ghast.getNearbyEntities(CARGO_SEARCH, CARGO_SEARCH, CARGO_SEARCH)) {
+            if (!(nearby instanceof Leashable leashable) || !leashable.isLeashed()) {
+                continue;
+            }
+            try {
+                if (ghast.equals(leashable.getLeashHolder())) {
+                    found.add(nearby.getUniqueId());
+                }
+            } catch (IllegalStateException noLongerLeashed) {
+                // Documented to throw when the leash has gone between the two calls above.
+            }
+        }
+        // Anything that has been untied gets its gravity back before it is forgotten about.
+        for (UUID id : List.copyOf(flight.cargo())) {
+            if (found.contains(id)) {
+                continue;
+            }
+            Entity gone = Bukkit.getEntity(id);
+            if (gone != null) {
+                gone.setGravity(true);
+            }
+            flight.cargo().remove(id);
+        }
+        flight.cargo().addAll(found);
+    }
+
+    /** Gives every carried entity its gravity back. Called from the one exit, like the chunk tickets. */
+    private void releaseCargo(Flight flight) {
+        for (UUID id : List.copyOf(flight.cargo())) {
+            Entity cargo = Bukkit.getEntity(id);
+            if (cargo != null) {
+                cargo.setGravity(true);
+            }
+        }
+        flight.cargo().clear();
+    }
+
     /** Holds the ghast still at a stop. A hovering happy ghast needs no help staying up. */
     private void hover(HappyGhast ghast) {
         ghast.setVelocity(new Vector());
@@ -531,6 +643,29 @@ public final class FlightService implements Listener {
 
     /** How far down its heading the ghast looks, so its head and body agree about where "forward" is. */
     private static final double LOOK_AHEAD_BLOCKS = 12.0;
+
+    /** How far under the ghast its cargo is carried — under the body, where the leads hang from. */
+    private static final double CARRY_BELOW = 3.0;
+
+    /** Within this of where it should be, the cargo simply matches the ghast's velocity. */
+    private static final double CARRY_SLACK = 1.5;
+
+    /** How hard the cargo is pulled back into place, per block of drift. */
+    private static final double CARRY_PULL = 0.35;
+
+    /**
+     * Beyond this the cargo is teleported rather than pulled.
+     * <p>
+     * Under vanilla's snap distance of sixteen, and under the ten at which the rope goes taut, so a boat that
+     * has fallen a long way behind is put back before the rope has an opinion about it.
+     */
+    private static final double CARRY_TELEPORT_GAP = 8.0;
+
+    /** How often the ghast is asked what is tied to it. A boat can be hitched on at any stop. */
+    private static final int CARGO_RESCAN_TICKS = 20;
+
+    /** How far around the ghast that question is asked. Vanilla's rope cannot be longer than this. */
+    private static final double CARGO_SEARCH = 20.0;
 
     private void arrive(Flight flight, HappyGhast ghast) {
         if (passengers(ghast).isEmpty()) {
@@ -579,6 +714,15 @@ public final class FlightService implements Listener {
         // Passengers are retained explicitly: the default is to drop them, and dropping somebody from cruise
         // altitude over another world is the single worst thing this plugin could do to a player.
         ghast.teleportAsync(above, TeleportFlag.EntityState.RETAIN_PASSENGERS);
+        // Whatever is on the leads comes too, or the rope snaps across a world boundary and the boat is left
+        // in the world the ghast has just left.
+        for (UUID id : List.copyOf(flight.cargo())) {
+            Entity cargo = Bukkit.getEntity(id);
+            if (cargo != null) {
+                cargo.teleportAsync(above.clone().subtract(0, CARRY_BELOW, 0),
+                        TeleportFlag.EntityState.RETAIN_PASSENGERS);
+            }
+        }
         releaseTickets(flight);
         flight.resetStall();
         flight.phase(Steering.Phase.APPROACH);
@@ -587,8 +731,20 @@ public final class FlightService implements Listener {
 
     // ------------------------------------------------------------------ progress, tickets, tidying up
 
-    /** Everything that does not have to happen every single tick. */
+    /**
+     * Everything that does not have to happen every single tick.
+     *
+     * <h2>Why a finished flight is refused here</h2>
+     * This is the orphan-boss-bar bug, and it left a bar on somebody's screen for every flight they ever
+     * completed. The order was: the boarding wait ends, {@code leaveStop} finishes the journey, {@link #end}
+     * takes the bar down and forgets the flight — and then this line ran, a few statements later in the same
+     * tick, and built a <em>new</em> bar for a flight that no longer exists. Nothing was left to ever hide it
+     * again, so it hung there, frozen on "Boarding", one per completed trip.
+     */
     private void refresh(Flight flight, HappyGhast ghast, boolean force) {
+        if (flight.isFinished()) {
+            return;
+        }
         if (!force && (ghast.getTicksLived() % REFRESH_TICKS) != 0) {
             return;
         }
@@ -618,6 +774,10 @@ public final class FlightService implements Listener {
      * and it is where the text version goes.
      */
     private void showProgress(Flight flight, HappyGhast ghast) {
+        if (flight.isFinished()) {
+            // Belt as well as braces: nothing may create a bar for a flight that has ended. See refresh().
+            return;
+        }
         List<UUID> interested = flight.interested(passengers(ghast));
         Component line = flight.describe(liveName(ghast, flight));
         float progress = flight.progress();
@@ -724,6 +884,7 @@ public final class FlightService implements Listener {
         }
         flight.finish();
         releaseTickets(flight);
+        releaseCargo(flight);
         land(flight);
         if (why != null) {
             announceTo(flight, List.of(), Text.warn("<why>", Text.arg("why", why)));
@@ -1032,21 +1193,19 @@ public final class FlightService implements Listener {
     /**
      * How fast this ghast flies — its own attribute, not a number this plugin made up.
      *
-     * <h2>Why the attribute is divided by the drag</h2>
-     * {@code FLYING_SPEED} is an <em>acceleration</em> per tick, not a speed: vanilla adds it to the
-     * velocity each tick and then multiplies the velocity by the air drag, so what a player actually
-     * experiences is the speed at which those two balance — {@code acceleration / (1 - drag)}. Setting the
-     * velocity to the attribute itself would fly the ghast at a fifteenth of its real speed.
+     * <h2>How the attribute becomes a speed</h2>
+     * By a measured ratio, not by arithmetic on vanilla's constants — see
+     * {@link #BLOCKS_PER_TICK_PER_FLYING_SPEED}, which explains why the arithmetic gave an answer five times
+     * too fast. A stock happy ghast comes out at about 3.8 blocks a second, which is what one flies at.
      *
-     * <p>{@code ghasts.speed-percent} scales that, so a server can make the network faster or slower
-     * without anybody having to decide what a ghast's speed is in blocks per second. A ghast carrying a
-     * speed modifier flies faster for free, which is the other reason to read the attribute.
+     * <p>{@code ghasts.speed-percent} scales the result, so a server can make the network faster or slower
+     * without anybody having to decide what a ghast's speed is in blocks per second. A ghast carrying a speed
+     * modifier flies faster for free, which is the other reason to read the attribute rather than a constant.
      */
     private double airspeed(HappyGhast ghast) {
         AttributeInstance flying = ghast.getAttribute(Attribute.FLYING_SPEED);
-        double acceleration = flying == null ? FALLBACK_FLYING_SPEED : flying.getValue();
-        double terminal = acceleration / (1 - AIR_DRAG);
-        return terminal * plugin.options().speedPercent() / 100.0;
+        double attribute = flying == null ? FALLBACK_FLYING_SPEED : flying.getValue();
+        return attribute * BLOCKS_PER_TICK_PER_FLYING_SPEED * plugin.options().speedPercent() / 100.0;
     }
 
     /**

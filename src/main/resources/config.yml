@@ -43,8 +43,9 @@ ghasts:
   # Seconds before the same player may call a ghast to them again. 0 for none.
   summon-cooldown-seconds: 30
 
-  # The furthest a flight will be started, in blocks. A refusal names the distance and this limit.
-  max-distance: 2000
+  # The furthest a flight will be started, in blocks. A happy ghast flies at about four blocks a second —
+  # that is the animal, not a setting — so 1200 blocks is roughly a five-minute journey.
+  max-distance: 1200
 
   # A ghast cannot fly between worlds — there is no route for it to take — so a cross-world flight
   # begins with it, and everybody aboard, appearing high above the destination and flying down. Off by

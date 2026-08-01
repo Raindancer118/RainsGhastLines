@@ -59,6 +59,13 @@ class TransitOptionsTest {
     }
 
     @Test
+    @DisplayName("the default flight is short, because a happy ghast is slow")
+    void defaultDistanceSuitsTheAnimalsSpeed() {
+        // ~3.8 blocks a second: 1200 blocks is about five minutes, which is a journey. 2000 was nine.
+        assertThat(TransitOptions.defaults().maxDistance()).isEqualTo(1200);
+    }
+
+    @Test
     @DisplayName("the default is the ghast's own speed, unscaled")
     void defaultIsTheGhastsOwnSpeed() {
         assertThat(TransitOptions.defaults().speedPercent())

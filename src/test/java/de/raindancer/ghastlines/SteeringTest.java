@@ -379,6 +379,36 @@ class SteeringTest {
     }
 
     @Nested
+    @DisplayName("how fast it goes")
+    class Airspeed {
+
+        /**
+         * The speed came out five times too fast, and the reason is worth remembering: reading vanilla's own
+         * {@code HappyGhast.travel} bytecode says {@code flying_speed * 5/3}, and {@code travelFlying} scales
+         * by an air drag of {@code 0.91} — arithmetic that gives ~18 blocks a second. A real ridden happy
+         * ghast, measured by sitting in the harness and holding forward, does under four. The engine uses the
+         * measured ratio, not the derivation, and this pins the number that was observed.
+         */
+        @Test
+        @DisplayName("a stock happy ghast flies at about four blocks a second, which is slow")
+        void stockGhastIsSlow() {
+            double perTick = 0.05 * 3.8;
+            double perSecond = perTick * TransitOptions.TICKS_PER_SECOND;
+            assertThat(perSecond).isBetween(3.0, 4.5);
+            assertThat(perSecond)
+                    .as("the arithmetic from vanilla's constants would give ~18, which it is not")
+                    .isLessThan(6.0);
+        }
+
+        @Test
+        @DisplayName("the estimate on the bar is computed from that speed, not from a constant")
+        void etaUsesTheGhastsSpeed() {
+            // 380 blocks at 3.8 blocks a second.
+            assertThat(Steering.etaSeconds(380, 0.05 * 3.8)).isEqualTo(100);
+        }
+    }
+
+    @Nested
     @DisplayName("what the bar says")
     class Progress {
 

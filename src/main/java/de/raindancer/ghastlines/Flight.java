@@ -109,6 +109,16 @@ public final class Flight {
     /** Who is currently being shown the progress, so it can be taken off them again. */
     private final Set<UUID> watchers = new HashSet<>();
 
+    /**
+     * What is hanging on the end of the ghast's leads — boats, mobs, anything leashable.
+     * <p>
+     * Held as ids and refreshed as the flight goes, because a boat can be tied on at a stop halfway through a
+     * route. Their gravity is switched off while they are being carried, so this set is also the list of what
+     * has to have it switched back on when the flight ends — which is why it lives on the flight and not in a
+     * local variable somewhere.
+     */
+    private final Set<UUID> cargo = new HashSet<>();
+
     private BossBar bar;
     private ScheduledTask task;
 
@@ -335,6 +345,10 @@ public final class Flight {
 
     Set<UUID> watchers() {
         return watchers;
+    }
+
+    Set<UUID> cargo() {
+        return cargo;
     }
 
     BossBar bar() {
