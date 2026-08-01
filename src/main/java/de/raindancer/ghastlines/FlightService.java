@@ -927,13 +927,22 @@ public final class FlightService implements Listener {
      * anybody can ask, and an entity cannot move while its chunk is unloaded, so that record is exact.
      */
     private void land(Flight flight) {
-        plugin.claims().loaded(flight.ghast()).ifPresent(ghast ->
-                ghast.getScheduler().run(plugin, ignored -> {
-                    if (passengers(ghast).isEmpty()) {
-                        ghast.setVelocity(new Vector());
-                    }
-                    ghast.setAware(true);
-                }, null));
+        plugin.claims().loaded(flight.ghast()).ifPresent(ghast -> {
+            Runnable handBack = () -> {
+                if (passengers(ghast).isEmpty()) {
+                    ghast.setVelocity(new Vector());
+                }
+                ghast.setAware(true);
+            };
+            // A disabled plugin cannot schedule anything, and every flight is ended by the shutdown — so
+            // on the way out this threw before the AI was ever handed back, leaving every ghast that had
+            // been flying saved with its AI off. Shutdown is on the server thread, so it is done here.
+            if (!plugin.isEnabled()) {
+                handBack.run();
+                return;
+            }
+            ghast.getScheduler().run(plugin, ignored -> handBack.run(), null);
+        });
     }
 
     /**
