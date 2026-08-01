@@ -1,11 +1,14 @@
 package de.raindancer.ghastlines;
 
 import io.papermc.paper.entity.TeleportFlag;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeInstance;
 import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.HappyGhast;
@@ -13,8 +16,11 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDeathEvent;
+import io.papermc.paper.entity.Leashable;
 import org.bukkit.event.entity.EntityRemoveEvent;
+import org.bukkit.event.entity.EntityUnleashEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.world.EntitiesUnloadEvent;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
@@ -59,8 +65,57 @@ public final class FlightService implements Listener {
     /** How often the boss bar, the chunk tickets and the ghast's remembered position are refreshed. */
     private static final int REFRESH_TICKS = 5;
 
-    /** Chunks either side of the ghast that are held loaded — two is roughly four seconds of flying. */
-    private static final int TICKET_RADIUS = 2;
+    /**
+     * Chunks either side of the ghast that are held loaded.
+     * <p>
+     * Three rather than two because {@link #look} may only read blocks inside this square — see there —
+     * and two chunks was not far enough ahead to clear a mountain in time.
+     */
+    private static final int TICKET_RADIUS = 3;
+
+    /** How far ahead the terrain is read. Inside the ticketed square, less a chunk for drift. */
+    private static final double LOOKAHEAD = (TICKET_RADIUS - 1) * 16.0;
+
+    /** How often a point is sampled along that stretch. A hill is wider than this. */
+    private static final double SAMPLE_SPACING = 8.0;
+
+    /** A happy ghast is four blocks tall, so this is where "above it" starts. */
+    private static final int GHAST_HEIGHT = 4;
+
+    /** Blocks of air above the ghast that count as room to climb into. */
+    private static final int CLIMB_PROBE = 3;
+
+    /** How far ahead a wall is looked for. */
+    private static final double[] AHEAD_PROBES = {3.0, 6.0};
+
+    /** The heights a wall is looked for at: the ghast's middle and its shoulders. */
+    private static final int[] BODY_HEIGHTS = {1, 3};
+
+    /** Vanilla's air drag for a flying entity: velocity is multiplied by this every tick. */
+    private static final double AIR_DRAG = 0.91;
+
+    /** Used only if a happy ghast turns up without the attribute registered. Vanilla's own value. */
+    private static final double FALLBACK_FLYING_SPEED = 0.05;
+
+    /** How long a diverted ghast is given to come down before it is left where it is. */
+    private static final int SETTLE_TIMEOUT_TICKS = 20 * TransitOptions.TICKS_PER_SECOND;
+
+    /**
+     * Columns tried when looking for somewhere to set down, nearest first.
+     * <p>
+     * Straight down, then the four sides at four blocks — a happy ghast's own width, so the ring is the next
+     * place it could actually fit — then the same again at eight.
+     */
+    private static final int[][] SETTLE_OFFSETS = {
+            {0, 0},
+            {4, 0}, {-4, 0}, {0, 4}, {0, -4},
+            {8, 0}, {-8, 0}, {0, 8}, {0, -8},
+            {6, 6}, {-6, 6}, {6, -6}, {-6, -6}};
+
+    /** Floors that are solid and still no place to leave somebody's animal. */
+    private static final Set<Material> DANGEROUS_FLOOR = Set.of(
+            Material.MAGMA_BLOCK, Material.CAMPFIRE, Material.SOUL_CAMPFIRE, Material.CACTUS,
+            Material.SWEET_BERRY_BUSH, Material.POINTED_DRIPSTONE, Material.WITHER_ROSE);
 
     private final GhastLines plugin;
     private final Tickets tickets;
@@ -284,9 +339,13 @@ public final class FlightService implements Listener {
         Location target = flight.currentLeg().target();
         flight.beginLeg(target == null ? 0 : ghast.getLocation().distance(target));
         flight.resetStall();
-        flight.phase(target == null ? Steering.Phase.BOARDING : Steering.initial(
-                ghast.getLocation().toVector(), aimAt(target),
-                cruiseHeightFor(ghast, target)));
+        if (target == null) {
+            flight.phase(Steering.Phase.BOARDING);
+            return;
+        }
+        Surroundings around = look(ghast, target);
+        flight.phase(Steering.initial(ghast.getLocation().toVector(), aimAt(target),
+                cruiseHeightFor(ghast, target, around)));
     }
 
     // ------------------------------------------------------------------ the flight itself
@@ -310,15 +369,39 @@ public final class FlightService implements Listener {
         if (!target.getWorld().equals(ghast.getWorld()) && !hop(flight, ghast, target)) {
             scheduled.cancel();
             end(flight, "It could not cross into " + target.getWorld().getName() + ".");
+            setDown(flight, ghast);
             return;
         }
 
         Vector position = ghast.getLocation().toVector();
+        Surroundings around = look(ghast, target);
+
+        // A detour is flown before the leg is: the waypoints are how the ghast gets out of wherever it could
+        // not fly straight out of, and until they are behind it the stop is not the thing to aim at.
+        if (flight.isDetouring() && flyDetour(flight, ghast, position, around)) {
+            refresh(flight, ghast, false);
+            return;
+        }
+
         Vector aim = aimAt(target);
-        double cruiseY = cruiseHeightFor(ghast, target);
+        double cruiseY = cruiseHeightFor(ghast, target, around);
 
         if (flight.isBoarding()) {
-            hover(ghast);
+            List<UUID> riders = passengers(ghast);
+            if (riders.isEmpty()) {
+                hover(ghast);
+            }
+            // A ghast that is being held still cannot be flown, and a player who has just climbed into the
+            // harness is trying to fly it. So the moment somebody is aboard the engine stops holding it:
+            // a summons is over — it did what it was called for — and a route lets go of the controls for
+            // the rest of its wait rather than pinning whoever got on.
+            if (!riders.isEmpty() && flight.purpose() == Flight.Purpose.SUMMON) {
+                scheduled.cancel();
+                end(flight, null);
+                aboardOnly(flight, ghast, Text.success("<ghast> is yours — fly it.",
+                        Text.part("ghast", liveName(ghast, flight))));
+                return;
+            }
             if (flight.boardingTick()) {
                 leaveStop(flight, ghast, scheduled);
             }
@@ -326,7 +409,7 @@ public final class FlightService implements Listener {
             return;
         }
 
-        Steering.Phase next = Steering.next(flight.phase(), position, aim, cruiseY);
+        Steering.Phase next = Steering.next(flight.phase(), position, aim, cruiseY, around);
         flight.phase(next);
         flight.blocksLeft(position.distance(aim));
 
@@ -336,16 +419,103 @@ public final class FlightService implements Listener {
             return;
         }
 
-        Vector velocity = Steering.velocity(next, position, aim, cruiseY, plugin.options().blocksPerTick());
-        ghast.setVelocity(velocity);
-        face(ghast, velocity);
+        double airspeed = airspeed(ghast);
+        flight.blocksPerTick(airspeed);
+        Vector velocity = Steering.velocity(next, position, aim, cruiseY, airspeed, around);
+        fly(ghast, velocity);
 
         if (flight.stalled(position)) {
-            scheduled.cancel();
-            end(flight, "It could not get through, so it has stopped where it is.");
+            stuck(flight, ghast, position, scheduled);
             return;
         }
         refresh(flight, ghast, false);
+    }
+
+    /**
+     * What happens when the ghast has stopped getting anywhere: look for a way out, and only give up if there
+     * is not one.
+     *
+     * <h2>Why the search happens here and not before every flight</h2>
+     * Because almost no flight needs it. Open sky is the normal case, the steering handles hills and walls on
+     * its own, and searching for a route around something that is not there would cost every flight for the
+     * sake of the rare one that is under a cliff. Being stuck is the signal that the cheap answer has run
+     * out — so that is when the expensive one runs, at most {@link #MAX_DETOURS} times per leg so a ghast in a
+     * maze cannot search for ever.
+     */
+    private void stuck(Flight flight, HappyGhast ghast, Vector position, ScheduledTask scheduled) {
+        if (flight.detourCount() < MAX_DETOURS) {
+            List<Vector> way = Escape.route(freeSpaceAround(ghast), position);
+            if (!way.isEmpty()) {
+                flight.detour(way);
+                aboardOnly(flight, ghast, Text.info("Finding a way out …"));
+                return;
+            }
+        }
+        scheduled.cancel();
+        end(flight, "It could not find a way through.");
+        setDown(flight, ghast);
+    }
+
+    /**
+     * Flies the next waypoint of a detour. Answers false when the detour is over and the leg can resume.
+     * <p>
+     * Waypoints are flown as approaches rather than as cruises: they are a few blocks apart, inside terrain,
+     * and there is no cruise line to hold — the whole point is to go exactly where the search said.
+     */
+    private boolean flyDetour(Flight flight, HappyGhast ghast, Vector position, Surroundings around) {
+        Vector waypoint = flight.nextWaypoint();
+        if (waypoint == null) {
+            return false;
+        }
+        if (position.distance(waypoint) <= WAYPOINT_RADIUS) {
+            flight.reachedWaypoint();
+            return flight.isDetouring();
+        }
+        if (flight.stalled(position)) {
+            // Stuck on the way out as well. The search was wrong, or something moved; drop it and let the
+            // ordinary stall handling have another go from where the ghast now is.
+            flight.abandonDetour();
+            return false;
+        }
+        double airspeed = airspeed(ghast);
+        flight.blocksPerTick(airspeed);
+        fly(ghast, Steering.velocity(Steering.Phase.APPROACH, position, waypoint, waypoint.getY(),
+                airspeed / Steering.APPROACH_SPEED_FACTOR, around));
+        return true;
+    }
+
+    /**
+     * Sets the velocity, turning rather than pivoting, and points the ghast where it is going.
+     * <p>
+     * The current velocity is read back off the entity rather than remembered: drag has already been applied
+     * to it, so it is what the ghast is actually doing, which is the only honest thing to turn away from.
+     */
+    private static void fly(HappyGhast ghast, Vector wanted) {
+        Vector turned = Steering.smooth(ghast.getVelocity(), wanted, Steering.MAX_TURN_PER_TICK);
+        ghast.setVelocity(turned);
+        face(ghast, turned);
+    }
+
+    /**
+     * The world around the ghast, as the escape search wants it.
+     * <p>
+     * Bounded to the chunks this flight is keeping loaded, for the reason given on {@link #look}: inside that
+     * square a block read is both loaded and this thread's business. Anything outside it is reported as solid,
+     * so the search will not route the ghast through a wall it has not actually looked at.
+     */
+    private Escape.Space freeSpaceAround(HappyGhast ghast) {
+        World world = ghast.getWorld();
+        Location where = ghast.getLocation();
+        int limit = TICKET_RADIUS * 16 - 8;
+        return (x, y, z) -> {
+            if (Math.abs(x - where.getBlockX()) > limit || Math.abs(z - where.getBlockZ()) > limit) {
+                return false;
+            }
+            if (y <= world.getMinHeight() || y >= world.getMaxHeight()) {
+                return false;
+            }
+            return !world.getBlockAt(x, y, z).getType().isSolid();
+        };
     }
 
     /** Holds the ghast still at a stop. A hovering happy ghast needs no help staying up. */
@@ -353,11 +523,22 @@ public final class FlightService implements Listener {
         ghast.setVelocity(new Vector());
     }
 
+    /** How close counts as having reached a detour waypoint. Wider than a stop: it is a gap, not a landing. */
+    private static final double WAYPOINT_RADIUS = 2.5;
+
+    /** How many times one leg may be talked out of somewhere before the flight is given up on. */
+    private static final int MAX_DETOURS = 4;
+
+    /** How far down its heading the ghast looks, so its head and body agree about where "forward" is. */
+    private static final double LOOK_AHEAD_BLOCKS = 12.0;
+
     private void arrive(Flight flight, HappyGhast ghast) {
-        hover(ghast);
+        if (passengers(ghast).isEmpty()) {
+            hover(ghast);
+        }
         int seconds = plugin.options().boardingSeconds();
         flight.startBoarding(seconds);
-        announce(flight, ghast, Text.success(
+        aboardOnly(flight, ghast, Text.success(
                 "<ghast> has arrived at <where> — <seconds>s to get on or off.",
                 Text.part("ghast", liveName(ghast, flight)),
                 Text.arg("where", flight.heading()), Text.num("seconds", seconds)));
@@ -367,12 +548,13 @@ public final class FlightService implements Listener {
         if (flight.purpose() == Flight.Purpose.SUMMON || !flight.advanceLeg()) {
             scheduled.cancel();
             end(flight, null);
-            announce(flight, ghast, Text.success("<ghast> is done — it is waiting for you at <where>.",
+            aboardOnly(flight, ghast, Text.success("<ghast> is waiting at <where>.",
                     Text.part("ghast", liveName(ghast, flight)), Text.arg("where", flight.heading())));
             return;
         }
         beginLeg(flight, ghast);
-        announce(flight, ghast, Text.info("Departing for <where>.", Text.arg("where", flight.heading())));
+        aboardOnly(flight, ghast, Text.info("Departing for <where>.",
+                Text.arg("where", flight.heading())));
     }
 
     /**
@@ -531,6 +713,11 @@ public final class FlightService implements Listener {
      * the plugin shutting down — because each of them has to give the chunk tickets back and put the AI on.
      */
     private void end(Flight flight, String why) {
+        // The bar comes down first, before anything here can return early. It used to be the last line, and
+        // a flight that ended twice — a cancel racing the entity scheduler's retired callback — left a boss
+        // bar on somebody's screen for the rest of the session, showing a flight that had stopped.
+        hideBar(flight);
+
         if (flying.remove(flight.ghast()) == null) {
             // Already ended: the entity scheduler's retired callback and an explicit cancel can both arrive.
             return;
@@ -541,7 +728,6 @@ public final class FlightService implements Listener {
         if (why != null) {
             announceTo(flight, List.of(), Text.warn("<why>", Text.arg("why", why)));
         }
-        hideBar(flight);
     }
 
     private void releaseTickets(Flight flight) {
@@ -549,13 +735,110 @@ public final class FlightService implements Listener {
         tickets.releaseAll(world, flight.tickets());
     }
 
-    /** Hands the ghast back to its own AI, and stops it drifting off with the last velocity we gave it. */
+    /**
+     * Hands the ghast back to itself: its own AI on, and not still carrying the last velocity we gave it.
+     *
+     * <h2>Why the AI comes back on rather than staying off</h2>
+     * A ghast frozen where it landed would be easier to find again — and it would be a statue. A happy
+     * ghast that bobs and drifts is what the animal looks like, and a server full of motionless ones parked
+     * at stops looks like a bug even though it would be a feature. Finding it again is solved where the
+     * problem actually is instead: {@link #onEntitiesUnload} writes down where it is at the last instant
+     * anybody can ask, and an entity cannot move while its chunk is unloaded, so that record is exact.
+     */
     private void land(Flight flight) {
         plugin.claims().loaded(flight.ghast()).ifPresent(ghast ->
                 ghast.getScheduler().run(plugin, ignored -> {
-                    ghast.setVelocity(new Vector());
+                    if (passengers(ghast).isEmpty()) {
+                        ghast.setVelocity(new Vector());
+                    }
                     ghast.setAware(true);
                 }, null));
+    }
+
+    /**
+     * Puts a ghast down somewhere sensible when its flight could not be finished.
+     *
+     * <h2>Why a failed flight lands instead of stopping</h2>
+     * A ghast abandoned in mid-air over unfamiliar terrain is a ghast its owner has to go and look for, and
+     * "it could not get through" tells them nothing about where to look. Setting it down on the ground it is
+     * over, and saying exactly where, turns a failure into a diversion: the ghast is somewhere, that somewhere
+     * is safe to stand, and the coordinates are in the message.
+     *
+     * <h2>Why this is not another flight</h2>
+     * Because the flight is what just failed. This is a short descent on the ghast's own scheduler with a
+     * hard time limit, holding no chunk tickets and no place in {@link #flying} — so it cannot fail in the
+     * same way, cannot be recalled, and cannot leave anything behind if the chunk unloads under it.
+     */
+    private void setDown(Flight flight, HappyGhast ghast) {
+        Location spot = safeSpotNear(ghast);
+        if (spot == null) {
+            announceTo(flight, passengers(ghast), Text.warn("<ghast> has stopped in the air at <where> — "
+                            + "there was nowhere under it to set down.",
+                    Text.part("ghast", liveName(ghast, flight)),
+                    Text.arg("where", roundedCoordinates(ghast.getLocation()))));
+            return;
+        }
+        Vector aim = new Vector(spot.getX(), spot.getY() + HOVER_ABOVE_STOP, spot.getZ());
+        int[] ticksLeft = {SETTLE_TIMEOUT_TICKS};
+
+        ghast.getScheduler().runAtFixedRate(plugin, scheduled -> {
+            if (!ghast.isValid() || --ticksLeft[0] <= 0) {
+                scheduled.cancel();
+                return;
+            }
+            Vector position = ghast.getLocation().toVector();
+            if (position.distance(aim) <= Steering.LANDED_RADIUS) {
+                scheduled.cancel();
+                ghast.setVelocity(new Vector());
+                ghast.setAware(true);
+                announceTo(flight, passengers(ghast), Text.info("<ghast> has set down at <where>.",
+                        Text.part("ghast", liveName(ghast, flight)),
+                        Text.arg("where", roundedCoordinates(spot))));
+                return;
+            }
+            ghast.setVelocity(Steering.velocity(Steering.Phase.APPROACH, position, aim, aim.getY(),
+                    airspeed(ghast), Surroundings.open(spot.getY())));
+        }, () -> {
+        }, 1L, 1L);
+    }
+
+    /**
+     * Somewhere near the ghast a four-block animal can stand.
+     * <p>
+     * Straight down first, because that is where it already is; then a ring of nearby columns, because the
+     * ghast may have got stuck precisely <em>because</em> what is under it is a wall or a lava lake. Answers
+     * null when none of them will do, which is the honest answer over an ocean of lava or the void.
+     */
+    private static Location safeSpotNear(HappyGhast ghast) {
+        World world = ghast.getWorld();
+        Location where = ghast.getLocation();
+        for (int[] offset : SETTLE_OFFSETS) {
+            int x = where.getBlockX() + offset[0];
+            int z = where.getBlockZ() + offset[1];
+            int ground = world.getHighestBlockYAt(x, z);
+            if (ground <= world.getMinHeight()) {
+                continue;
+            }
+            Material floor = world.getBlockAt(x, ground, z).getType();
+            if (!floor.isSolid() || DANGEROUS_FLOOR.contains(floor)) {
+                continue;
+            }
+            boolean roomAbove = true;
+            for (int up = 1; up <= GHAST_HEIGHT + 1; up++) {
+                if (world.getBlockAt(x, ground + up, z).getType().isSolid()) {
+                    roomAbove = false;
+                    break;
+                }
+            }
+            if (roomAbove) {
+                return new Location(world, x + 0.5, ground + 1, z + 0.5);
+            }
+        }
+        return null;
+    }
+
+    private static String roundedCoordinates(Location where) {
+        return Math.round(where.getX()) + ", " + Math.round(where.getY()) + ", " + Math.round(where.getZ());
     }
 
     /** Called from {@code onDisable}: a flight outliving the plugin holds chunks loaded for ever. */
@@ -571,10 +854,35 @@ public final class FlightService implements Listener {
 
     // ------------------------------------------------------------------ talking
 
-    private void announce(Flight flight, HappyGhast ghast, Component message) {
-        announceTo(flight, passengers(ghast), message);
+    /**
+     * Tells the people on board, and nobody else.
+     *
+     * <h2>Why an owner does not hear every stop</h2>
+     * A loop with four stops and an eight-second wait announces itself nine times a minute, for as long as the
+     * line is running. Somebody riding it wants to know where it has stopped — that is the announcement at a bus
+     * stop. Its owner, mining two thousand blocks away, wants to know that it left and would like to be told if
+     * it goes wrong, and nothing else. So a stop is announced to the harness, and a departure, a failure and the
+     * end of the journey go to whoever asked for it. The boss bar is there the whole time for anybody who does
+     * want to watch.
+     *
+     * <p>The one exception is a summons, which is a flight <em>to</em> somebody: they are told it arrived,
+     * because being told is the entire point of having called it.
+     */
+    private void aboardOnly(Flight flight, HappyGhast ghast, Component message) {
+        List<UUID> riders = new ArrayList<>(passengers(ghast));
+        if (flight.purpose() == Flight.Purpose.SUMMON && flight.requestedBy() != null
+                && !riders.contains(flight.requestedBy())) {
+            riders.add(flight.requestedBy());
+        }
+        for (UUID id : riders) {
+            Player player = Bukkit.getPlayer(id);
+            if (player != null) {
+                Text.status(player, message);
+            }
+        }
     }
 
+    /** Tells everybody with a stake in the flight: the endings, and where the ghast ended up. */
     private void announceTo(Flight flight, List<UUID> passengers, Component message) {
         for (UUID id : flight.interested(passengers)) {
             Player player = Bukkit.getPlayer(id);
@@ -618,26 +926,154 @@ public final class FlightService implements Listener {
     /**
      * The height for this tick's crossing.
      * <p>
-     * Only the ground under the ghast is measured, never the ground at the far end: on Folia the destination
-     * may belong to another region, and reading a block there from this thread is not allowed. The stop's own
-     * Y stands in for the ground at the far end, which is exactly what it is — somebody stood there to make
-     * it. Rising terrain is handled as it arrives: the clearance is twelve blocks by default and the ghast
-     * covers less than one per tick, so it has plenty of warning.
+     * The stop's own Y stands in for the ground at the far end, which is exactly what it is — somebody
+     * stood there to make the stop — and never a block read at the destination: on Folia that may belong
+     * to another region, and reading a block there from this thread is not allowed. What the ghast is
+     * about to fly over comes from {@link #look}.
      */
-    private double cruiseHeightFor(HappyGhast ghast, Location target) {
+    private double cruiseHeightFor(HappyGhast ghast, Location target, Surroundings around) {
         Location where = ghast.getLocation();
         double groundBelow = ghast.getWorld().getHighestBlockYAt(where);
-        return Steering.cruiseY(groundBelow, target.getY(), where.getY(),
+        return Steering.cruiseY(groundBelow, around.groundAhead(), target.getY(), where.getY(),
                 plugin.options().clearance(), ghast.getWorld().getMaxHeight());
     }
 
-    /** Points the ghast where it is going, because a ghast flying backwards looks like a bug. */
+    /**
+     * Reads the three things about the world that the steering cannot work out from coordinates.
+     *
+     * <h2>Why this only ever looks a short way ahead</h2>
+     * Every block read here has to be in a chunk this flight is keeping loaded, and — on Folia — in the
+     * ghast's own region. Those are the same condition: Folia groups <em>adjacent loaded</em> chunks into
+     * one region, and {@link #holdChunksAround} keeps a square of {@link #TICKET_RADIUS} chunks either
+     * side of the ghast loaded, so anything inside that square is both loaded and this thread's business.
+     * {@link #LOOKAHEAD} is that square, less a chunk for the ghast's own drift.
+     *
+     * <p>At a happy ghast's own speed that is several seconds of warning, which is what the ghast needs to
+     * be over a hill rather than into it.
+     */
+    private Surroundings look(HappyGhast ghast, Location target) {
+        World world = ghast.getWorld();
+        Location where = ghast.getLocation();
+
+        Vector along = new Vector(target.getX() - where.getX(), 0, target.getZ() - where.getZ());
+        double distance = along.length();
+        Vector step = distance <= 1.0e-6 ? new Vector() : along.multiply(1 / distance);
+
+        // The ground it is about to be over. The stretch is sampled rather than swept: a hill is many
+        // blocks wide, and four heightmap reads per tick is nothing next to being right about it. It starts
+        // at the ground underneath rather than at the bottom of the world, so a ghast hovering over its stop
+        // — with no distance left to sample — is not told the terrain has fallen away beneath it.
+        double groundAhead = world.getHighestBlockYAt(where);
+        double reach = Math.min(LOOKAHEAD, Math.max(0, distance));
+        for (double forward = SAMPLE_SPACING; forward <= reach; forward += SAMPLE_SPACING) {
+            int x = (int) Math.floor(where.getX() + step.getX() * forward);
+            int z = (int) Math.floor(where.getZ() + step.getZ() * forward);
+            groundAhead = Math.max(groundAhead, world.getHighestBlockYAt(x, z));
+        }
+
+        boolean blocked = blockedAhead(world, where, step);
+        // The sides are only probed when something is in the way: two more block reads a tick for a question
+        // that has no bearing on a flight through open sky.
+        Vector left = new Vector(-step.getZ(), 0, step.getX());
+        boolean clearLeft = !blocked || !blockedAhead(world, where, left);
+        boolean clearRight = !blocked || !blockedAhead(world, where, left.clone().multiply(-1));
+
+        return new Surroundings(clearAbove(world, where), blocked, clearLeft, clearRight, groundAhead);
+    }
+
+    /**
+     * Whether climbing would achieve anything.
+     * <p>
+     * A happy ghast is four blocks tall, so the ceiling that stops it is the one above <em>that</em>, not
+     * the one above its feet. Checked over the whole probe rather than one block up, because a one-block
+     * gap under a roof is not room to climb into.
+     */
+    private static boolean clearAbove(World world, Location where) {
+        int x = where.getBlockX();
+        int z = where.getBlockZ();
+        for (int up = GHAST_HEIGHT; up <= GHAST_HEIGHT + CLIMB_PROBE; up++) {
+            int y = where.getBlockY() + up;
+            if (y >= world.getMaxHeight()) {
+                return false;
+            }
+            if (world.getBlockAt(x, y, z).getType().isSolid()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Whether something solid is straight ahead at the ghast's own height.
+     * <p>
+     * Two heights are probed, at its middle and its shoulders, and two distances out — a wall is worth
+     * noticing a couple of blocks early, and a fence post is not worth climbing over.
+     */
+    private static boolean blockedAhead(World world, Location where, Vector step) {
+        if (step.lengthSquared() <= 1.0e-6) {
+            return false;
+        }
+        for (double forward : AHEAD_PROBES) {
+            int x = (int) Math.floor(where.getX() + step.getX() * forward);
+            int z = (int) Math.floor(where.getZ() + step.getZ() * forward);
+            for (int up : BODY_HEIGHTS) {
+                int y = where.getBlockY() + up;
+                if (y < world.getMinHeight() || y >= world.getMaxHeight()) {
+                    continue;
+                }
+                if (world.getBlockAt(x, y, z).getType().isSolid()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * How fast this ghast flies — its own attribute, not a number this plugin made up.
+     *
+     * <h2>Why the attribute is divided by the drag</h2>
+     * {@code FLYING_SPEED} is an <em>acceleration</em> per tick, not a speed: vanilla adds it to the
+     * velocity each tick and then multiplies the velocity by the air drag, so what a player actually
+     * experiences is the speed at which those two balance — {@code acceleration / (1 - drag)}. Setting the
+     * velocity to the attribute itself would fly the ghast at a fifteenth of its real speed.
+     *
+     * <p>{@code ghasts.speed-percent} scales that, so a server can make the network faster or slower
+     * without anybody having to decide what a ghast's speed is in blocks per second. A ghast carrying a
+     * speed modifier flies faster for free, which is the other reason to read the attribute.
+     */
+    private double airspeed(HappyGhast ghast) {
+        AttributeInstance flying = ghast.getAttribute(Attribute.FLYING_SPEED);
+        double acceleration = flying == null ? FALLBACK_FLYING_SPEED : flying.getValue();
+        double terminal = acceleration / (1 - AIR_DRAG);
+        return terminal * plugin.options().speedPercent() / 100.0;
+    }
+
+    /**
+     * Points the ghast where it is going.
+     *
+     * <h2>Why both the body and the head</h2>
+     * {@code setRotation} turns the body; a mob also has a head yaw of its own, and setting only the first
+     * leaves a ghast flying along with its face pointing where it was looking before — which is what "it flies
+     * sideways" looks like. {@code lookAt} handles the head, aimed a good way down the current heading so the
+     * two agree rather than fighting over a point a block away.
+     *
+     * <p>Pitch is deliberately left level. A ghast is a balloon with a face on it; tipping it nose-down on a
+     * descent makes it look like it is falling.
+     */
     private static void face(HappyGhast ghast, Vector velocity) {
         if (velocity.lengthSquared() < 1.0e-4) {
             return;
         }
-        Location facing = ghast.getLocation().setDirection(velocity);
+        Location where = ghast.getLocation();
+        Location facing = where.clone().setDirection(velocity);
         ghast.setRotation(facing.getYaw(), 0);
+
+        Vector heading = velocity.clone();
+        heading.setY(0);
+        if (heading.lengthSquared() > 1.0e-6) {
+            ghast.lookAt(where.clone().add(heading.normalize().multiply(LOOK_AHEAD_BLOCKS)));
+        }
     }
 
     // ------------------------------------------------------------------ what else can end a flight
@@ -662,6 +1098,69 @@ public final class FlightService implements Listener {
         if (summonCooldownRemaining(event.getPlayer()) <= 0) {
             // Kept while it is still running: dropping it on quit would make logging out the way to skip it.
             lastSummon.remove(id);
+        }
+    }
+
+    /**
+     * Keeps a lead from snapping when what it is holding is a ghast's cargo.
+     *
+     * <h2>The thing this fixes</h2>
+     * Leash a boat to a happy ghast, step into the boat, and vanilla breaks the lead: the boat gains a
+     * passenger, its position and movement change in the same tick, the distance check fires, and the lead
+     * you just tied comes off — which is exactly the moment you needed it. Carrying somebody in a boat is one
+     * of the two things this plugin exists to make possible, so the distance rule does not get to end it.
+     *
+     * <h2>Why two reasons and not one</h2>
+     * The honest answer is that the exact reason vanilla gives could not be pinned down: a headless test client
+     * cannot tie a lead through the protocol translation this server is tested behind, so the event was never
+     * observed firing. {@code DISTANCE} is the reason that fits what happens — a boat that gains a passenger
+     * moves and is moved in the same tick — and {@code UNKNOWN} is what an unattributed vanilla break arrives
+     * as. Both are refused when the holder is a happy ghast; the ones that are somebody's decision or a missing
+     * end are not:
+     * <ul>
+     *   <li>{@code PLAYER_UNLEASH} — a lead a player unties is untied.</li>
+     *   <li>{@code HOLDER_GONE}, {@code LEASHED_GONE} — one end no longer exists; there is nothing to hold.</li>
+     * </ul>
+     * Nothing about leads anywhere else on the server changes: the holder has to be a happy ghast.
+     */
+    @EventHandler(ignoreCancelled = true)
+    public void onUnleash(EntityUnleashEvent event) {
+        if (event.getReason() != EntityUnleashEvent.UnleashReason.DISTANCE
+                && event.getReason() != EntityUnleashEvent.UnleashReason.UNKNOWN) {
+            return;
+        }
+        if (!(event.getEntity() instanceof Leashable leashed) || !leashed.isLeashed()) {
+            return;
+        }
+        Entity holder;
+        try {
+            holder = leashed.getLeashHolder();
+        } catch (IllegalStateException notLeashedAfterAll) {
+            // Documented to throw when the leash has already gone; nothing to protect.
+            return;
+        }
+        if (holder instanceof HappyGhast) {
+            event.setCancelled(true);
+        }
+    }
+
+    /**
+     * Writes down where a claimed ghast was, at the last moment anybody can ask it.
+     *
+     * <h2>Why this event and not a timer</h2>
+     * A summons has to load the chunk the ghast is in, which means knowing which chunk that is. The position
+     * in the claim is only refreshed while a flight is in progress, so a ghast that was parked, ridden by
+     * hand, pushed by a piston or moved by another plugin would be recorded wherever it last flew to. This
+     * is the exact instant its position stops being observable, so it is the right instant to save it.
+     */
+    @EventHandler
+    public void onEntitiesUnload(EntitiesUnloadEvent event) {
+        for (Entity entity : event.getEntities()) {
+            if (!(entity instanceof HappyGhast ghast)) {
+                continue;
+            }
+            plugin.store().claimOf(ghast.getUniqueId())
+                    .ifPresent(claim -> plugin.claims().sawAt(claim, ghast));
         }
     }
 

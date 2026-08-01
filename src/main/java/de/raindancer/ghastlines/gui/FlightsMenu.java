@@ -75,8 +75,7 @@ public final class FlightsMenu extends Menu {
                 Text.arg("where", flight.heading())));
         lore.add(Text.itemLore("stop <n> of <of> · about <eta>s to go",
                 Text.num("n", flight.legNumber()), Text.num("of", flight.legCount()),
-                Text.num("eta", Steering.etaSeconds(flight.blocksLeft(),
-                        plugin.options().blocksPerTick()))));
+                Text.num("eta", Steering.etaSeconds(flight.blocksLeft(), flight.blocksPerTick()))));
         if (flight.routeName() != null) {
             lore.add(Text.itemLore("on the '<route>' line (<kind>)",
                     Text.arg("route", flight.routeName()),

@@ -6,6 +6,7 @@
 #   /ghast send <where>     send it — and anyone aboard — to a stop or one of your homes
 #   /ghast status           every ghast in the air, and how far along it is
 #   /gstop add <name>       make where you are standing a stop
+#   /gstop label <name> …   an alias to show it under; you still type the short name
 #   /groute create <name>   start a line; two or more stops, one way or a loop
 #
 # A ghast's name is its name tag. Put one on and it answers to that; without one it answers to the
@@ -27,9 +28,9 @@ ghasts:
   max-stops: 12
   max-routes: 5
 
-  # Blocks per second. Vanilla walking is about 4 and a boat on ice is about 40; 12 feels like a slow
-  # aeroplane. Higher makes the network more useful and the journey less of one.
-  speed: 12
+  # A percentage of a happy ghast's own flying speed, read off the entity — so 100 is exactly as fast as
+  # the animal flies and this plugin has no opinion about what that should be in blocks per second.
+  speed-percent: 100
 
   # Blocks of air kept between a flying ghast and the ground under it. This is what makes it fly over
   # a mountain rather than into it, so a low number on hilly terrain means a lot of climbing.

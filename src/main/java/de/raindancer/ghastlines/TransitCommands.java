@@ -39,6 +39,9 @@ import java.util.Optional;
  */
 public final class TransitCommands {
 
+    /** How long a stop's alias may be. Long enough for a sentence, short enough for a menu row. */
+    private static final int MAX_LABEL_LENGTH = 32;
+
     private TransitCommands() {
     }
 
@@ -126,6 +129,8 @@ public final class TransitCommands {
                     case "add", "set" -> addStop(plugin, player, rest(args, 1));
                     case "remove", "delete" -> removeStop(plugin, player, rest(args, 1));
                     case "share" -> shareStop(plugin, player, rest(args, 1));
+                    case "label", "alias" -> labelStop(plugin, player, args);
+                    case "rename" -> renameStop(plugin, player, args);
                     case "list" -> listStops(plugin, player);
                     case "help" -> stopHelp(player);
                     default -> Text.tell(player, Text.error(
@@ -141,8 +146,8 @@ public final class TransitCommands {
                     return List.of();
                 }
                 if (args.length <= 1) {
-                    return startingWith(List.of("add", "remove", "share", "list", "help"),
-                            args.length == 0 ? "" : args[0]);
+                    return startingWith(List.of("add", "remove", "share", "label", "rename", "list",
+                            "help"), args.length == 0 ? "" : args[0]);
                 }
                 if (args.length == 2 && !args[0].equalsIgnoreCase("add")) {
                     return startingWith(plugin.store().stopNames(player.getUniqueId()), args[1]);
@@ -358,8 +363,7 @@ public final class TransitCommands {
             sender.sendMessage(Text.raw("  <bar> ", Text.part("bar", FlightService.bar(flight.progress())))
                     .append(flight.describe(name))
                     .append(Text.raw(" <" + Text.MUTED + ">· <eta>s · <id>",
-                            Text.num("eta", Steering.etaSeconds(flight.blocksLeft(),
-                                    plugin.options().blocksPerTick())),
+                            Text.num("eta", Steering.etaSeconds(flight.blocksLeft(), flight.blocksPerTick())),
                             Text.arg("id", flight.ghast().toString().substring(0, 8)))));
         }
     }
@@ -421,6 +425,94 @@ public final class TransitCommands {
                 : Text.success("'<name>' is private again.", Text.arg("name", flipped.name())));
     }
 
+    /**
+     * Gives a stop an alias — the free-text name it is shown under.
+     * <p>
+     * Separate from {@link #renameStop} on purpose: this changes what a stop is <em>called</em> and nothing
+     * else, so no route, no tab completion and no other player's destination list has to be touched. Renaming
+     * the key is the operation that has consequences, and it is a different word.
+     */
+    private static void labelStop(GhastLines plugin, Player player, String[] args) {
+        if (args.length < 2) {
+            Text.tell(player, Text.error("Usage: /gstop label <stop> <what to call it>  "
+                    + "— with nothing after the stop, the alias is removed."));
+            return;
+        }
+        Optional<Stop> stop = plugin.store().findStop(player.getUniqueId(), args[1]);
+        if (stop.isEmpty()) {
+            unknownStop(plugin, player, args[1]);
+            return;
+        }
+        String alias = rest(args, 2);
+        if (alias.length() > MAX_LABEL_LENGTH) {
+            Text.tell(player, Text.error("That is longer than <n> characters.",
+                    Text.num("n", MAX_LABEL_LENGTH)));
+            return;
+        }
+        plugin.store().putStop(player.getUniqueId(), player.getName(), stop.get().withLabel(alias));
+        Text.tell(player, alias.isBlank()
+                ? Text.success("'<name>' is shown by its name again.", Text.arg("name", stop.get().name()))
+                : Text.success("'<name>' is now shown as '<alias>'. You still type '<name>'.",
+                        Text.arg("name", stop.get().name()), Text.arg("alias", alias)));
+    }
+
+    /**
+     * Renames a stop, and every route that calls at it.
+     * <p>
+     * The routes are the reason this is a command rather than "delete it and make a new one": a route holds
+     * stop names, so renaming a stop out from under one would leave a line that refuses to fly and a player
+     * with no idea why. Both halves happen here, or neither does.
+     */
+    private static void renameStop(GhastLines plugin, Player player, String[] args) {
+        if (args.length < 3) {
+            Text.tell(player, Text.error("Usage: /gstop rename <stop> <new name>"));
+            return;
+        }
+        Optional<Stop> stop = plugin.store().findStop(player.getUniqueId(), args[1]);
+        if (stop.isEmpty()) {
+            unknownStop(plugin, player, args[1]);
+            return;
+        }
+        String wanted = Names.normalise(args[2]);
+        if (wanted == null) {
+            Text.tell(player, Text.error("A stop's name is <rule>.", Text.arg("rule", Names.requirement())));
+            return;
+        }
+        if (wanted.equals(stop.get().name())) {
+            Text.tell(player, Text.warn("That is already its name."));
+            return;
+        }
+        if (plugin.store().findStop(player.getUniqueId(), wanted).isPresent()) {
+            Text.tell(player, Text.error("You already have a stop called '<name>'.",
+                    Text.arg("name", wanted)));
+            return;
+        }
+
+        plugin.store().removeStop(player.getUniqueId(), stop.get().name());
+        plugin.store().putStop(player.getUniqueId(), player.getName(), stop.get().withName(wanted));
+
+        List<String> touched = new ArrayList<>();
+        for (Route route : plugin.store().routesOf(player.getUniqueId())) {
+            if (!route.stops().contains(stop.get().name())) {
+                continue;
+            }
+            List<String> renamed = route.stops().stream()
+                    .map(called -> called.equals(stop.get().name()) ? wanted : called)
+                    .toList();
+            plugin.store().putRoute(player.getUniqueId(), player.getName(),
+                    new Route(route.name(), route.owner(), renamed, route.loop(), route.shared(),
+                            route.createdAt()));
+            touched.add(route.name());
+        }
+
+        Text.tell(player, Text.success("'<old>' is now '<new>'.",
+                Text.arg("old", stop.get().name()), Text.arg("new", wanted)));
+        if (!touched.isEmpty()) {
+            Text.tell(player, Text.info("Also fixed the routes that call at it: <list>",
+                    Text.arg("list", String.join(", ", touched))));
+        }
+    }
+
     private static void listStops(GhastLines plugin, Player player) {
         List<Stop> mine = plugin.store().stopsOf(player.getUniqueId());
         if (mine.isEmpty()) {
@@ -430,8 +522,11 @@ public final class TransitCommands {
         player.sendMessage(Text.info("Your stops (<n>/<limit>):", Text.num("n", mine.size()),
                 Text.arg("limit", Limits.describe(player, plugin.options().maxStops()))));
         for (Stop stop : mine) {
-            player.sendMessage(Text.raw("  <" + Text.TEXT + "><name> <" + Text.MUTED + ">— <world>, <where><shared>",
-                    Text.arg("name", stop.name()), Text.arg("world", stop.world()),
+            player.sendMessage(Text.raw("  <" + Text.TEXT + "><name><alias> <" + Text.MUTED
+                            + ">— <world>, <where><shared>",
+                    Text.arg("name", stop.name()),
+                    Text.arg("alias", stop.label().isBlank() ? "" : " \"" + stop.label() + "\""),
+                    Text.arg("world", stop.world()),
                     Text.arg("where", stop.coordinates()),
                     Text.arg("shared", stop.shared() ? " (public)" : "")));
         }
@@ -740,6 +835,9 @@ public final class TransitCommands {
         help(player, "/gstop add <name>", "make where you are standing a stop");
         help(player, "/gstop remove <name>", "forget one");
         help(player, "/gstop share <name>", "let everybody fly to it, or stop letting them");
+        help(player, "/gstop label <name> <text>", "an alias to show it under — spaces and capitals "
+                + "allowed; you still type the short name");
+        help(player, "/gstop rename <name> <new>", "change the name you type, and every route using it");
         help(player, "/gstop list", "your stops");
     }
 

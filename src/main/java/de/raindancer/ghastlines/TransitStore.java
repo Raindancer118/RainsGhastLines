@@ -304,6 +304,7 @@ public final class TransitStore {
             }
             mine.put(name, new Stop(name, owner, where.getString("world", ""),
                     where.getDouble("x"), where.getDouble("y"), where.getDouble("z"),
+                    where.getString("label", ""),
                     where.getBoolean("shared", false), where.getLong("created")));
         }
         if (!mine.isEmpty()) {
@@ -428,6 +429,11 @@ public final class TransitStore {
             yaml.set(path + ".x", stop.x());
             yaml.set(path + ".y", stop.y());
             yaml.set(path + ".z", stop.z());
+            if (!stop.label().isBlank()) {
+                // Only written when it has one: an empty key in every stop would be noise in a file an
+                // admin reads.
+                yaml.set(path + ".label", stop.label());
+            }
             yaml.set(path + ".shared", stop.shared());
             yaml.set(path + ".created", stop.createdAt());
         }));

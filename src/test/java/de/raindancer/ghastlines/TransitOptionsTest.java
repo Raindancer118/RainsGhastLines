@@ -28,7 +28,7 @@ class TransitOptionsTest {
         config.set("max-per-player", 4);
         config.set("max-stops", 30);
         config.set("max-routes", 9);
-        config.set("speed", 20);
+        config.set("speed-percent", 150);
         config.set("cruise-clearance", 24);
         config.set("boarding-seconds", 15);
         config.set("summon-cooldown-seconds", 60);
@@ -37,21 +37,21 @@ class TransitOptionsTest {
         config.set("progress-in-boss-bar", false);
 
         assertThat(TransitOptions.from(config))
-                .isEqualTo(new TransitOptions(4, 30, 9, 20, 24, 15, 60, 5000, true, false));
+                .isEqualTo(new TransitOptions(4, 30, 9, 150, 24, 15, 60, 5000, true, false));
     }
 
     @Test
     @DisplayName("nonsense is clamped into range rather than refused")
     void clampsNonsense() {
         YamlConfiguration config = new YamlConfiguration();
-        config.set("speed", -5);
+        config.set("speed-percent", -5);
         config.set("cruise-clearance", 0);
         config.set("boarding-seconds", 0);
         config.set("max-distance", 1);
         config.set("max-per-player", 9999);
 
         TransitOptions options = TransitOptions.from(config);
-        assertThat(options.speed()).isEqualTo(1);
+        assertThat(options.speedPercent()).isEqualTo(25);
         assertThat(options.clearance()).isEqualTo(4);
         assertThat(options.boardingSeconds()).isEqualTo(1);
         assertThat(options.maxDistance()).isEqualTo(50);
@@ -59,10 +59,11 @@ class TransitOptionsTest {
     }
 
     @Test
-    @DisplayName("the per-second speed becomes a per-tick one for the flight loop")
-    void speedBecomesPerTick() {
-        assertThat(TransitOptions.defaults().blocksPerTick())
-                .isEqualTo(TransitOptions.defaults().speed() / (double) TransitOptions.TICKS_PER_SECOND);
+    @DisplayName("the default is the ghast's own speed, unscaled")
+    void defaultIsTheGhastsOwnSpeed() {
+        assertThat(TransitOptions.defaults().speedPercent())
+                .as("100 means 'as fast as a happy ghast flies'; the speed itself comes off the entity")
+                .isEqualTo(100);
     }
 
     @Test

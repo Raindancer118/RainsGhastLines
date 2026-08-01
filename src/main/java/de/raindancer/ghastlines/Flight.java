@@ -4,7 +4,9 @@ import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -72,6 +74,15 @@ public final class Flight {
     private int boardingTicksLeft;
     private boolean finished;
 
+    /**
+     * The airspeed this flight is being flown at, in blocks per tick.
+     * <p>
+     * Kept here rather than recomputed by whoever wants an estimate: it comes from the ghast's own
+     * attribute, so only the flight — which has the entity — can answer it, and the status board has no
+     * business loading a chunk to find out.
+     */
+    private double blocksPerTick = 0.5;
+
     /** How long a ghast may make no headway before the flight is given up on. */
     private static final int STALL_WINDOW_TICKS = 5 * TransitOptions.TICKS_PER_SECOND;
 
@@ -80,6 +91,17 @@ public final class Flight {
 
     private org.bukkit.util.Vector stallFrom;
     private int stallTicks;
+
+    /**
+     * Waypoints out of somewhere the ghast could not fly straight out of — see {@link Escape}.
+     * <p>
+     * Flown before the leg is resumed, and thrown away as soon as they are. A detour is not part of the
+     * timetable: {@code /ghast status} still says where the ghast is going, because it is still going there.
+     */
+    private final Deque<org.bukkit.util.Vector> detour = new ArrayDeque<>();
+
+    /** How many times this leg has had to be talked out of somewhere, so it cannot try for ever. */
+    private int detours;
 
     /** The chunks this flight is keeping loaded, as chunk keys. Owned by {@link FlightService}. */
     private final Set<Long> tickets = new HashSet<>();
@@ -167,6 +189,15 @@ public final class Flight {
         return blocksLeft;
     }
 
+    /** Blocks per tick, as read from the ghast itself. */
+    public double blocksPerTick() {
+        return blocksPerTick;
+    }
+
+    void blocksPerTick(double airspeed) {
+        this.blocksPerTick = airspeed;
+    }
+
     public int boardingSecondsLeft() {
         return (int) Math.ceil((double) boardingTicksLeft / TransitOptions.TICKS_PER_SECOND);
     }
@@ -194,6 +225,8 @@ public final class Flight {
     void beginLeg(double distance) {
         this.legLength = Math.max(distance, 1.0e-6);
         this.blocksLeft = distance;
+        this.detours = 0;
+        this.detour.clear();
     }
 
     void blocksLeft(double left) {
@@ -260,6 +293,38 @@ public final class Flight {
     void resetStall() {
         stallFrom = null;
         stallTicks = 0;
+    }
+
+    // ------------------------------------------------------------------ getting out of somewhere
+
+    /** The waypoint the ghast is flying to right now, or {@code null} when it is flying the leg itself. */
+    org.bukkit.util.Vector nextWaypoint() {
+        return detour.peek();
+    }
+
+    boolean isDetouring() {
+        return !detour.isEmpty();
+    }
+
+    /** How many detours this leg has needed. Two is bad luck; five is a ghast that will never arrive. */
+    int detourCount() {
+        return detours;
+    }
+
+    void detour(List<org.bukkit.util.Vector> waypoints) {
+        detour.clear();
+        detour.addAll(waypoints);
+        detours++;
+        resetStall();
+    }
+
+    void reachedWaypoint() {
+        detour.poll();
+        resetStall();
+    }
+
+    void abandonDetour() {
+        detour.clear();
     }
 
     // ------------------------------------------------------------------ the bits the service owns

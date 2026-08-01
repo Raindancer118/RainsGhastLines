@@ -11,14 +11,16 @@ import org.bukkit.configuration.ConfigurationSection;
  * downstream knows or cares which, and {@code GhastLinesPlugin} stays the only file that differs
  * between the two builds. See MODULES.md in Rain's SMP Core.
  *
- * <h2>Why the speed is per second and the engine works per tick</h2>
- * "Twelve blocks a second" is a number an admin can picture; "0.6 blocks a tick" is not. The division
- * happens once, in {@link #blocksPerTick()}, rather than in the flight loop.
+ * <h2>Why the speed is a percentage and not a number of blocks</h2>
+ * Because a happy ghast already has a speed, and inventing a second one made the flight feel like a
+ * plugin rather than like the animal: the first version flew at a flat twelve blocks a second whatever the
+ * ghast's own attributes said. {@link FlightService} reads {@code FLYING_SPEED} off the entity and this
+ * scales it, so 100 means "as fast as a happy ghast flies" and a server can still tune the network.
  *
  * @param maxGhasts        claimed ghasts one player may hold
  * @param maxStops         stops one player may keep
  * @param maxRoutes        routes one player may keep
- * @param speed            cruising speed in blocks per second
+ * @param speedPercent     cruising speed as a percentage of the ghast's own flying speed
  * @param clearance        blocks of air kept between the ghast and the ground below it
  * @param boardingSeconds  how long a ghast hovers at a stop so people can get on or off
  * @param summonCooldownSeconds seconds before the same player may summon again
@@ -26,7 +28,7 @@ import org.bukkit.configuration.ConfigurationSection;
  * @param allowCrossWorld  whether a destination in another world is offered at all
  * @param bossBar          whether flight progress goes on a boss bar rather than the action bar
  */
-public record TransitOptions(int maxGhasts, int maxStops, int maxRoutes, int speed, int clearance,
+public record TransitOptions(int maxGhasts, int maxStops, int maxRoutes, int speedPercent, int clearance,
                              int boardingSeconds, int summonCooldownSeconds, int maxDistance,
                              boolean allowCrossWorld, boolean bossBar) {
 
@@ -34,7 +36,7 @@ public record TransitOptions(int maxGhasts, int maxStops, int maxRoutes, int spe
     public static final int TICKS_PER_SECOND = 20;
 
     public static TransitOptions defaults() {
-        return new TransitOptions(2, 12, 5, 12, 12, 8, 30, 2000, false, true);
+        return new TransitOptions(2, 12, 5, 100, 12, 8, 30, 2000, false, true);
     }
 
     /** Reads the standalone plugin's own {@code config.yml}, or the host's {@code ghasts:} section. */
@@ -47,7 +49,7 @@ public record TransitOptions(int maxGhasts, int maxStops, int maxRoutes, int spe
                 clamp(config.getInt("max-per-player", fallback.maxGhasts()), 0, 20),
                 clamp(config.getInt("max-stops", fallback.maxStops()), 0, 100),
                 clamp(config.getInt("max-routes", fallback.maxRoutes()), 0, 50),
-                clamp(config.getInt("speed", fallback.speed()), 1, 40),
+                clamp(config.getInt("speed-percent", fallback.speedPercent()), 25, 400),
                 clamp(config.getInt("cruise-clearance", fallback.clearance()), 4, 64),
                 clamp(config.getInt("boarding-seconds", fallback.boardingSeconds()), 1, 60),
                 clamp(config.getInt("summon-cooldown-seconds", fallback.summonCooldownSeconds()), 0, 3600),
@@ -62,11 +64,6 @@ public record TransitOptions(int maxGhasts, int maxStops, int maxRoutes, int spe
      */
     private static int clamp(int value, int low, int high) {
         return Math.max(low, Math.min(high, value));
-    }
-
-    /** The speed the flight loop actually uses. */
-    public double blocksPerTick() {
-        return (double) speed / TICKS_PER_SECOND;
     }
 
     public boolean hasSummonCooldown() {

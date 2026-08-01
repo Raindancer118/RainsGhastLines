@@ -39,39 +39,65 @@ tag, so the name floats over the ghast for everybody and survives without this p
 Two ghasts named the same are ambiguous. `/ghast list` shows the tokens so you can see it, the id form
 always works, and renaming one fixes it.
 
-## It flies the route
+## It flies the route, and it navigates
 
-A summons is not a teleport. The ghast climbs to a height that clears the ground under it, crosses at
-`speed` blocks a second, comes down onto you and hovers for `boarding-seconds` while you get on —
-or attach a boat, or leash something to it. Rising terrain raises the cruise height as it arrives, so
-it goes over a mountain rather than into it.
+A summons is not a teleport. The ghast flies at **its own speed** — `FLYING_SPEED` read off the entity and
+scaled by `speed-percent`, so 100 means "as fast as a happy ghast flies" and this plugin has no opinion about
+what that is in blocks per second. It climbs *while* flying rather than rising like a lift, holds a cruise
+line kept clear of the terrain **ahead** of it, and comes down a glide slope three blocks long for every block
+of height to lose, so it arrives level with the stop instead of stopping dead above it and sinking. Every
+heading change is rate-limited, so it banks into turns and looks where it is going.
 
-Progress goes on a **boss bar** for whoever called it, whoever owns the ghast and whoever is riding it.
-`progress-in-boss-bar: false` puts the same line, with a text bar, on the action bar instead.
+Things in the way are answered in order of how little they cost:
+
+| In the way | What it does |
+|---|---|
+| A hill, a ridge, rising ground | The cruise line rises to clear it, measured **along the route** — not underneath, which is ground already crossed |
+| A wall or tower with room beside it | Goes **round** it, in a shallow curve. A five-block tower is not worth climbing over |
+| A wall with no way round | Climbs over it |
+| A roof, an overhang, a hangar | Cannot climb, so it flies out from under first and climbs once clear |
+| None of that works | Searches the area for a way out — breadth-first over four-block cells, a ghast's width — and flies the corners of the route it finds |
+| Nowhere out at all | Gives up, says so, and **sets down** on safe ground nearby, naming the coordinates |
+
+A ghast that has stopped getting anywhere — under two blocks in five seconds — is what triggers the last two.
+
+It lands **five blocks in front of you**, along the way you are looking, rather than on your head: a happy
+ghast is four blocks across, and one that arrives on the spot you are standing on fills the screen. Once
+somebody is in the harness the engine lets go of the controls, so a ghast you have just boarded is a ghast you
+can fly.
+
+Progress goes on a **boss bar** for whoever called it, whoever owns the ghast and whoever is riding it. Stops
+on a line are announced **to the people aboard** — a four-stop loop would otherwise tell its owner where it is
+nine times a minute — while a summons tells whoever called it, because being told is the point of calling it.
 
 Two things make a long flight work at all:
 
-- A flight holds **plugin chunk tickets** two chunks around the ghast. An entity does not load the
-  world around it — without them the ghast stops being ticked the moment it leaves what a player has
-  loaded, and the flight freezes in mid-air. Tickets are counted, so two ghasts on the same line do
-  not unload the chunks the other is still flying through.
-- The ghast's **AI is switched off** for the duration. A happy ghast left to itself drifts, and a
-  drifting ghast fights every velocity the engine sets.
+- A flight holds **plugin chunk tickets** three chunks around the ghast. An entity does not load the world
+  around it — without them the ghast stops being ticked the moment it leaves what a player has loaded, and the
+  flight freezes in mid-air. Tickets are counted, so two ghasts on the same line do not unload the chunks the
+  other is still flying through.
+- The ghast's **AI is switched off** for the duration. A happy ghast left to itself drifts, and a drifting
+  ghast fights every velocity the engine sets.
 
-Both are given back on every ending there is: arrival, recall, the ghast dying, and the plugin
-shutting down. A leaked chunk ticket is a chunk loaded for the rest of the server's life.
+Both are given back on every ending there is: arrival, recall, the ghast dying, and the plugin shutting down.
+A leaked chunk ticket is a chunk loaded for the rest of the server's life. The AI comes back on when the
+flight ends, on purpose — a parked ghast bobs and drifts like the animal it is rather than standing there like
+a statue, and a summons still finds it because its position is written down at the instant its chunk unloads,
+which is the last moment anybody can ask.
 
-A ghast that cannot get through — wedged under an overhang, walled in — is noticed by having moved
-less than two blocks in five seconds, and the flight ends saying so rather than hovering there for ever.
-
-A player in the harness still has the reins: vanilla lets whoever is riding steer, and their input is
-added to what the autopilot sets. That is the right way round — you can always take over, and keeping
-your hands off gets you to the stop.
+A lead tied from a happy ghast to a boat is not allowed to snap when somebody steps into the boat. Vanilla's
+distance check fires in that same tick and unties it, which is precisely the moment you needed it; carrying
+somebody in a boat is one of the two things this plugin exists for, so that one check is refused when the
+holder is a happy ghast. A lead a player unties is untied.
 
 ## Stops and lines
 
-**Stops** are yours; `share` publishes one, and a published stop appears in everybody else's
-destination list as `owner:stop`.
+**Stops** are yours; `share` publishes one, and a published stop appears in everybody else's destination list
+as `owner:stop`. A stop's name is what you type — lower case, no spaces, because it is a command argument —
+and `/gstop label <stop> <text>` gives it an **alias** to be displayed under, with capitals and spaces and
+anything else you like. Nothing looks a stop up by its alias: a second name you could also type would be a
+second thing to disagree with the first. `/gstop rename` changes the typed name instead, and fixes up every
+route that calls at it in the same breath.
 
 **Lines** are two or more of *your own* stops, in an order you can reorder, flown one way or as a loop.
 A loop keeps going round until it is recalled. Only your own stops, deliberately: a line whose stops
@@ -92,6 +118,9 @@ Everything is in `config.yml`, with the reasoning next to each key. The two wort
 
 - **`cruise-clearance`** (default 12) is what makes a flight clear the terrain. Low numbers on hilly
   ground mean a lot of climbing.
+- **`speed-percent`** (default 100) scales the ghast's *own* flying speed. There is deliberately no
+  blocks-per-second setting: the animal already has a speed, and inventing a second one made the flight feel
+  like a plugin.
 - **`allow-cross-world`** is **off**. There is no route between two worlds for a ghast to fly, so a
   cross-world flight begins with it — and everybody aboard, passengers retained explicitly — appearing
   high above the destination and flying down. It is the one part of this plugin where the ghast does
@@ -148,15 +177,28 @@ places this plugin does not own.
 ## Building
 
 ```
-JAVA_HOME=/usr/lib/jvm/java-25-temurin mvn verify   # 53 tests → target/RainsGhastLines-1.0.0.jar
+JAVA_HOME=/usr/lib/jvm/java-25-temurin mvn verify   # 53 tests → target/RainsGhastLines-1.0.1.jar
 ```
 
 Java 25, because Paper 26.2 ships class files at version 69 and requires it at runtime.
 
 ## Verified
 
-Against a real Paper 26.2-82 server with a headless player driving it, **0 exceptions**: a ghast
-claimed, two stops made 200 blocks apart, called — it climbed to y −48 over ground at −60, crossed,
-descended onto the player and waited — a two-stop loop line run and taken out of service, a name tag
-written and the token following it, all four menus opened and read back slot by slot, and
-`transit.yml` reloading unchanged after a restart.
+Against a real Paper 26.2-82 server with a headless player driving it (mineflayer through
+ViaVersion/ViaBackwards), **0 exceptions**, on an obstacle course built on cleared ground:
+
+- a **25-block wall** across the route — the ghast went round the end of it in a curve, glided down and
+  arrived at the aim point;
+- a ghast parked under a **40-block-wide roof** eight blocks above it — it flew out from under, climbed over
+  the roof, crossed 120 blocks and landed by the player;
+- a **five-block tower** on the line — ignored, because the cruise height already cleared it;
+- a name tag written in game changing both the name and the token (`Bus 12` → `bus_12`);
+- all four menus opening and read back slot by slot, and `transit.yml` reloading unchanged after a restart.
+
+The landing was wrong twice before it was right, and both are pinned by tests now: it measured the ground
+*beneath* itself and flew into walls it had already passed, and then it hung ten blocks above the player
+bobbing, because the glide slope and the "you are too low" reflex were fighting each other once per tick.
+
+**Not verified in game:** a ghast sealed in with no way out at all — the "give up and set down nearby" path.
+Both halves are unit-tested, and every box built to test it turned out to have a gap the search legitimately
+found.

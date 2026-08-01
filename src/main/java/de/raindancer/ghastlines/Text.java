@@ -86,13 +86,15 @@ public final class Text {
     }
 
     /**
-     * Sends something to the action bar whatever the host's setting says.
+     * Sends a flight's running commentary.
      * <p>
-     * Used for the flight progress line, and only for it. Progress is a status display that replaces
-     * itself several times a second: in chat it would be a wall of scrolling text, so this is the one
-     * message in the plugin that is not the recipient's — or the admin's — choice.
+     * The same door as {@link #tell}, deliberately: the host's {@code messages.personal-in-action-bar} setting
+     * is now obeyed without a width fallback, so a series of related lines all land in the same place instead
+     * of splitting between chat and the action bar according to how long each one happened to be. Kept as its
+     * own method because the commentary is the one thing here that has to stay <em>short</em> — an action bar
+     * does not wrap — and a name for it is where that can be said.
      */
     public static void status(Audience recipient, Component message) {
-        recipient.sendActionBar(message);
+        tell(recipient, message);
     }
 }

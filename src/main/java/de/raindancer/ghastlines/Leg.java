@@ -3,6 +3,7 @@ package de.raindancer.ghastlines;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
+import org.bukkit.util.Vector;
 
 import java.util.UUID;
 
@@ -25,6 +26,18 @@ import java.util.UUID;
  */
 public record Leg(String label, Destination fixed, UUID follow) {
 
+    /**
+     * How far in front of a player a summoned ghast comes to rest.
+     *
+     * <h2>Why not on them</h2>
+     * Because a happy ghast is four blocks across, and one that descends onto the exact spot somebody is
+     * standing on arrives in their face — it fills the screen, and getting on means backing out from under
+     * it first. Five blocks along the way they are looking puts it where they can see all of it and walk
+     * into the harness. Their own eye height is kept, so on a cliff edge it holds station rather than
+     * sinking to whatever is below.
+     */
+    public static final double LANDING_OFFSET = 5.0;
+
     public static Leg to(Destination destination) {
         return new Leg(destination.label(), destination, null);
     }
@@ -42,8 +55,19 @@ public record Leg(String label, Destination fixed, UUID follow) {
     public Location target() {
         if (follow != null) {
             Player player = Bukkit.getPlayer(follow);
-            return player == null || !player.isOnline() ? null : player.getLocation();
+            return player == null || !player.isOnline() ? null : inFrontOf(player);
         }
         return fixed == null ? null : fixed.location();
+    }
+
+    /** A point {@link #LANDING_OFFSET} blocks along the way the player is looking, at their own height. */
+    static Location inFrontOf(Player player) {
+        Location where = player.getLocation();
+        Vector facing = where.getDirection().setY(0);
+        if (facing.lengthSquared() < 1.0e-6) {
+            // Looking straight up or down: any direction will do, and one of them is repeatable.
+            facing = new Vector(0, 0, 1);
+        }
+        return where.clone().add(facing.normalize().multiply(LANDING_OFFSET));
     }
 }

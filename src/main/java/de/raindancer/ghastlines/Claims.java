@@ -3,14 +3,17 @@ package de.raindancer.ghastlines;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
+import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.HappyGhast;
 import org.bukkit.entity.Player;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
@@ -36,6 +39,9 @@ public final class Claims {
 
     /** How far from a player a ghast may be and still be the one they mean. */
     public static final double CLAIM_RADIUS = 12.0;
+
+    /** Chunks either side of where a ghast was last seen that a summons will look in. */
+    private static final int SEARCH_RADIUS = 2;
 
     /** What a ghast with no name tag is called. */
     public static final String UNNAMED = "Unnamed ghast";
@@ -251,26 +257,45 @@ public final class Claims {
             missing.run();
             return;
         }
-        world.getChunkAtAsync(lastSeen).thenAccept(chunk -> onRegionThread(lastSeen, () -> {
-            // Deliberately not held: the ticket is the flight's business, and a summons that fails must
-            // not leave a chunk loaded for the rest of the server's life. Loading it is enough to make the
-            // entity real; a moment later it may unload again, and by then the flight has started and
-            // taken its own tickets out.
-            Optional<HappyGhast> nowHere = loaded(claim.ghast());
-            if (nowHere.isPresent()) {
-                found.accept(nowHere.get());
-                return;
+
+        // A square of chunks and not the one it was last seen in. The recorded position is where it was
+        // when its chunk unloaded, and a ghast that was pushed, leashed, or claimed before this plugin
+        // started parking them can be a little way off. Twenty-five chunks is a lot to load at once, and
+        // this happens once per summons, by hand, because somebody asked for it.
+        int centreX = lastSeen.getBlockX() >> 4;
+        int centreZ = lastSeen.getBlockZ() >> 4;
+        List<CompletableFuture<Chunk>> loading = new ArrayList<>();
+        for (int x = -SEARCH_RADIUS; x <= SEARCH_RADIUS; x++) {
+            for (int z = -SEARCH_RADIUS; z <= SEARCH_RADIUS; z++) {
+                loading.add(world.getChunkAtAsync(centreX + x, centreZ + z));
             }
-            // Some servers keep entities in a separate region file that a chunk load does not walk;
-            // asking the chunk itself is the reliable second look.
-            for (Entity entity : chunk.getEntities()) {
-                if (entity.getUniqueId().equals(claim.ghast()) && entity instanceof HappyGhast happy) {
-                    found.accept(happy);
-                    return;
-                }
-            }
-            missing.run();
-        }));
+        }
+
+        CompletableFuture.allOf(loading.toArray(CompletableFuture[]::new))
+                .thenRun(() -> onRegionThread(lastSeen, () -> {
+                    // The chunks are deliberately not ticketed here: a summons that fails must not leave
+                    // twenty-five chunks loaded for the rest of the server's life. Loading them is enough
+                    // to make the entity real, and by the time they unload again the flight has started
+                    // and taken its own tickets out.
+                    Optional<HappyGhast> nowHere = loaded(claim.ghast());
+                    if (nowHere.isPresent()) {
+                        found.accept(nowHere.get());
+                        return;
+                    }
+                    // Entities live in their own storage, which a chunk load does not always walk; asking
+                    // each chunk what is in it is the reliable second look.
+                    for (CompletableFuture<Chunk> chunk : loading) {
+                        for (Entity entity : chunk.getNow(null) == null
+                                ? new Entity[0] : chunk.getNow(null).getEntities()) {
+                            if (entity.getUniqueId().equals(claim.ghast())
+                                    && entity instanceof HappyGhast happy) {
+                                found.accept(happy);
+                                return;
+                            }
+                        }
+                    }
+                    missing.run();
+                }));
     }
 
     /** Notes where a ghast is, so a summons can find it after the chunk unloads. */

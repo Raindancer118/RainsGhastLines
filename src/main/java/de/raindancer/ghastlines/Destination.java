@@ -27,7 +27,7 @@ public record Destination(String key, String label, String kind, String world,
     }
 
     public static Destination fromStop(Stop stop, String key, String kind) {
-        return new Destination(key, stop.name(), kind, stop.world(), stop.x(), stop.y(), stop.z());
+        return new Destination(key, stop.display(), kind, stop.world(), stop.x(), stop.y(), stop.z());
     }
 
     /** The place itself, or {@code null} when its world is not loaded. */

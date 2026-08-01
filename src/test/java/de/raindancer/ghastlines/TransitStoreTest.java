@@ -43,8 +43,8 @@ class TransitStoreTest {
         Path file = folder.resolve("transit.yml");
         TransitStore store = store(file);
 
-        store.putStop(ALICE, "Alice", new Stop("base", ALICE, "world", 1.5, 64, -2.5, false, 100L));
-        store.putStop(ALICE, "Alice", new Stop("market", ALICE, "world", 10, 70, 20, true, 200L));
+        store.putStop(ALICE, "Alice", new Stop("base", ALICE, "world", 1.5, 64, -2.5, "", false, 100L));
+        store.putStop(ALICE, "Alice", new Stop("market", ALICE, "world", 10, 70, 20, "", true, 200L));
         store.putRoute(ALICE, "Alice",
                 new Route("commute", ALICE, List.of("base", "market"), true, true, 300L));
         UUID ghast = UUID.randomUUID();
@@ -53,8 +53,8 @@ class TransitStoreTest {
         TransitStore again = reloaded(file, store);
 
         assertThat(again.stopsOf(ALICE)).containsExactly(
-                new Stop("base", ALICE, "world", 1.5, 64, -2.5, false, 100L),
-                new Stop("market", ALICE, "world", 10, 70, 20, true, 200L));
+                new Stop("base", ALICE, "world", 1.5, 64, -2.5, "", false, 100L),
+                new Stop("market", ALICE, "world", 10, 70, 20, "", true, 200L));
         assertThat(again.findRoute(ALICE, "commute")).contains(
                 new Route("commute", ALICE, List.of("base", "market"), true, true, 300L));
         assertThat(again.claimOf(ghast)).contains(
@@ -68,8 +68,8 @@ class TransitStoreTest {
     void namesAreScopedToTheirOwner(@TempDir Path folder) {
         Path file = folder.resolve("transit.yml");
         TransitStore store = store(file);
-        store.putStop(ALICE, "Alice", new Stop("mine", ALICE, "world", 1, 1, 1, false, 0L));
-        store.putStop(BOB, "Bob", new Stop("mine", BOB, "world", 2, 2, 2, false, 0L));
+        store.putStop(ALICE, "Alice", new Stop("mine", ALICE, "world", 1, 1, 1, "", false, 0L));
+        store.putStop(BOB, "Bob", new Stop("mine", BOB, "world", 2, 2, 2, "", false, 0L));
 
         TransitStore again = reloaded(file, store);
         assertThat(again.findStop(ALICE, "mine")).get().extracting(Stop::x).isEqualTo(1.0);
@@ -81,8 +81,8 @@ class TransitStoreTest {
     @DisplayName("only shared stops leave their owner, and a shared stop is still theirs")
     void sharingIsWhatMakesAStopPublic(@TempDir Path folder) {
         TransitStore store = store(folder.resolve("transit.yml"));
-        store.putStop(ALICE, "Alice", new Stop("base", ALICE, "world", 1, 1, 1, false, 0L));
-        store.putStop(ALICE, "Alice", new Stop("market", ALICE, "world", 2, 2, 2, true, 0L));
+        store.putStop(ALICE, "Alice", new Stop("base", ALICE, "world", 1, 1, 1, "", false, 0L));
+        store.putStop(ALICE, "Alice", new Stop("market", ALICE, "world", 2, 2, 2, "", true, 0L));
 
         assertThat(store.sharedStops()).extracting(Stop::name).containsExactly("market");
         assertThat(store.stopsOf(ALICE)).extracting(Stop::name).containsExactly("base", "market");
@@ -93,7 +93,7 @@ class TransitStoreTest {
     @DisplayName("lookups are case-insensitive, because the names are stored folded")
     void lookupsFoldCase(@TempDir Path folder) {
         TransitStore store = store(folder.resolve("transit.yml"));
-        store.putStop(ALICE, "Alice", new Stop("base", ALICE, "world", 1, 1, 1, false, 0L));
+        store.putStop(ALICE, "Alice", new Stop("base", ALICE, "world", 1, 1, 1, "", false, 0L));
         assertThat(store.findStop(ALICE, "BASE")).isPresent();
         assertThat(store.findStop(ALICE, "my.stop"))
                 .as("a name this plugin would never store cannot match one it did")
@@ -106,7 +106,7 @@ class TransitStoreTest {
     void removalTidiesUp(@TempDir Path folder) {
         Path file = folder.resolve("transit.yml");
         TransitStore store = store(file);
-        store.putStop(ALICE, "Alice", new Stop("base", ALICE, "world", 1, 1, 1, false, 0L));
+        store.putStop(ALICE, "Alice", new Stop("base", ALICE, "world", 1, 1, 1, "", false, 0L));
         assertThat(store.removeStop(ALICE, "base")).isPresent();
         assertThat(store.removeStop(ALICE, "base")).isEmpty();
         assertThat(store.stopCount(ALICE)).isZero();
@@ -171,6 +171,25 @@ class TransitStoreTest {
                 .get().extracting(Route::stops).isEqualTo(List.of("good"));
         assertThat(store.totalClaims()).isZero();
         store.close();
+    }
+
+    @Test
+    @DisplayName("an alias is kept, and only written when there is one")
+    void labelsRoundTrip(@TempDir Path folder) throws Exception {
+        Path file = folder.resolve("transit.yml");
+        TransitStore store = store(file);
+        store.putStop(ALICE, "Alice",
+                new Stop("mine", ALICE, "world", 1, 1, 1, "The Deep Mine", false, 0L));
+        store.putStop(ALICE, "Alice", new Stop("base", ALICE, "world", 2, 2, 2, "", false, 0L));
+
+        TransitStore again = reloaded(file, store);
+        assertThat(again.findStop(ALICE, "mine")).get().extracting(Stop::display)
+                .isEqualTo("The Deep Mine");
+        assertThat(again.findStop(ALICE, "base")).get().extracting(Stop::display).isEqualTo("base");
+        assertThat(Files.readString(file))
+                .as("a stop without an alias should not carry an empty key")
+                .doesNotContain("label: ''");
+        again.close();
     }
 
     @Test
